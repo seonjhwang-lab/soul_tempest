@@ -73,6 +73,14 @@
     HEIGHT: INTERNAL_H,
     DEBUG_MOBILE_LAYOUT: DEBUG_MOBILE_LAYOUT,
 
+    /* LAZY DINER STEP 7: 옛 Moonlit 의 달의 돌(정화) 활성화를 켜고 끄는 스위치.
+       꺼져 있는 것이 기본이다 — 정화는 모슬링을 고기 없이 죽이고 다시 나타나지
+       못하게 해서 Lazy Diner 루프를 막을 수 있기 때문이다. 이 값이 false 면
+       updateMoonstone() 이 맨 앞에서 돌아가므로 달의 돌은 그려지고 길을 막기만
+       할 뿐 아무 일도 일으키지 않는다. 옛 코드는 그대로 남아 있어, 콘솔에서
+       MG.Game.LEGACY_MOONSTONE_ENABLED = true 로 켜면 예전처럼 동작한다. */
+    LEGACY_MOONSTONE_ENABLED: false,
+
     canvas: null,
     ctx: null,
     stage: null,
@@ -523,6 +531,8 @@
        사각형만 본다. 사전 타겟팅(findPreAttackTarget)은 모슬링 목록만
        훑으므로 달의 돌을 겨냥하는 일도 없다(설계상 그대로 둔다). */
     updateMoonstone: function (dt) {
+      // LAZY DINER STEP 7: 옛 기능이 꺼져 있으면 달의 돌은 아무 반응도 하지 않는다.
+      if (!this.LEGACY_MOONSTONE_ENABLED) return;
       if (!MG.Map || !MG.Map.moonstone) return;
       var m = MG.Map.moonstone;
 
