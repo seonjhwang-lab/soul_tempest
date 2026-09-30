@@ -67,6 +67,12 @@
   var STOVE_INTERACT_ENTER = 26;
   var STOVE_INTERACT_LEAVE = 36;
 
+  /* LAZY DINER STEP 11: 하루를 마치는 장면의 글. 문 앞에서 두 줄(화자 이름 없음)이
+     나오고, 끝나면 다음 날 아침이 바깥에서 시작된다. 아침 토스트는 손님의 chapter
+     ("다음에 낼 밤")로 고른다 — 1 이면 이제 둘째 날, 2 면 셋째 날이다. */
+  var CLOSING_LINES = ['(불을 끄고 문을 잠근다)', '…내일도 문은 열어야지.'];
+  var MORNING_TOASTS = { 1: '둘째 날 아침.', 2: '셋째 날 아침.' };
+
   var Game = {
     VERSION: '0.1.11',
     WIDTH: INTERNAL_W,
@@ -165,6 +171,11 @@
        사망/부활로는 되돌아가지 않고 재시작에서만 false 로 돌아간다. */
     _farewellStarted: false,
     _farewellDone: false,
+
+    /* LAZY DINER STEP 11: 하루를 마치는 중(닫는 대사가 열린 순간부터 finishDay 까지).
+       그동안 문 발판은 다시 반응하지 않는다 — 플레이어가 문 발판 위에 선 채로 대사가
+       열리기 때문이다. finishDay 에서 false 로 돌아오고, 재시작에서도 false 로 돌아온다. */
+    _closingDay: false,
 
     /* PHASE 8.1-B: 숲이 정화되었는가. moonstoneFound 와 마찬가지로 이번
        세션 동안만 유지되는 불린 하나이며, 사망/부활로 절대 되돌아가지
@@ -442,7 +453,8 @@
     updateZoneTransition: function (dt) {
       // LAZY DINER STEP 5: 작별이 시작된 뒤에는 문이 다시 열리지 않는다 — 대사 중,
       // 완료 화면이 뜨기 전의 뜸, 완료 화면 어느 때에도 플레이어는 다이너에 남는다.
-      if (this._farewellStarted) return;
+      // LAZY DINER STEP 11: 하루를 마치는 대사가 열려 있는 동안에도 마찬가지다.
+      if (this._farewellStarted || this._closingDay) return;
 
       if (this._zoneCooldownT > 0) {
         this._zoneCooldownT = Math.max(0, this._zoneCooldownT - dt);
@@ -461,6 +473,15 @@
       // 작별 대사가 열린다. 구역 전환은 이번 프레임에 일어나지 않는다.
       if (M.zone === 'diner' && this.clueHeard) {
         this.startFarewell();
+        return;
+      }
+
+      // LAZY DINER STEP 11: 오늘 손님이 이미 떠났다면(앞의 두 밤) 문은 나가는 문이
+      // 아니라 "오늘 영업을 마치는" 문이다. 먹이기 전에는 위 분기를 모두 지나쳐
+      // 예전처럼 그냥 나간다.
+      if (M.zone === 'diner' && MG.Customer && MG.Customer.isGoneForToday &&
+          MG.Customer.isGoneForToday()) {
+        this.startClosingDay();
         return;
       }
 
@@ -485,6 +506,70 @@
       // 화면에 계속 떠 있으면 안 된다. onDone(단서 확보)은 부르지 않는다 —
       // 끝까지 듣지 않고 나간 것이므로 그 보상은 다음에 다시 들어야 한다.
       if (MG.UI && MG.UI.hideSpeech) MG.UI.hideSpeech();
+
+      // LAZY DINER STEP 10: 밖에서 다이너로 들어온 바로 이 프레임에 손님에게 알린다 —
+      // 나갔다 돌아오면 다음 밤이다(규칙은 customer.js 의 onArriveDiner 가 갖는다).
+      if (next === 'diner' && MG.Customer && MG.Customer.onArriveDiner) {
+        MG.Customer.onArriveDiner();
+      }
+    },
+
+    /* LAZY DINER STEP 11: 하루를 마친다 — 손님이 떠난 뒤 문 발판을 밟으면 시작된다.
+       기존 대화 상자를 화자 이름 없이 연다(새 UI 없음). 끝까지 넘기면 finishDay 가
+       불린다. 대화가 열려 있는 동안의 조작 잠금은 기존 잠금이 맡는다. 대사를 열지
+       못하면 플레이어가 문 앞에 갇히지 않도록 곧바로 finishDay 로 넘어간다. */
+    startClosingDay: function () {
+      if (this._closingDay) return;
+      this._closingDay = true;
+
+      var self = this;
+      var opened = false;
+      if (MG.UI && MG.UI.showSpeech) {
+        MG.UI.showSpeech('', CLOSING_LINES, function () { self.finishDay(); });
+        opened = !!(MG.UI.isSpeechOpen && MG.UI.isSpeechOpen());
+      }
+      if (!opened) this.finishDay();
+    },
+
+    /* LAZY DINER STEP 11: 다음 날 아침 — 바깥 시작 지점에서 다시 시작한다. 고기와 라면은
+       그대로 가져간다. 모슬링은 기존 Enemy.init() 으로 9마리가 모두 돌아온다(정화된
+       숲에서는 돌아오지 않는 기존 규칙도 그대로다). 다음 밤이 시작되는 것은 여기
+       뿐이다 — 손님을 다시 WAITING 으로 돌리는 startNewDay 도 여기서만 부른다. */
+    finishDay: function () {
+      var M = MG.Map, p = MG.Player;
+
+      if (M && M.setZone) M.setZone('outside');
+      this.syncZoneClass();
+
+      if (p && M) {
+        p.x = M.spawn.x;
+        p.y = M.spawn.y;
+        p.facing = 'down';
+        p.attackFacing = 'down';
+        p.attacking = false;
+        p.attackT = 0;
+        p.cooldownT = 0;
+        p.moving = false;
+        p.hp = p.maxHp;
+        if (MG.UI && MG.UI.renderHearts) MG.UI.renderHearts(p.hp, p.maxHp);
+      }
+
+      // 대사를 넘기는 동안 눌려 있던 이동 키/조이스틱이 새 아침에 이어지지 않게 한다 —
+      // 바깥 시작 지점에서 문 발판까지는 46px 밖에 안 되어, 남아 있으면 곧바로 다시 들어간다.
+      if (MG.Input && MG.Input.reset) MG.Input.reset();
+
+      if (MG.Enemy && MG.Enemy.init) MG.Enemy.init();
+
+      var advanced = MG.Customer && MG.Customer.startNewDay && MG.Customer.startNewDay();
+      this._zoneCooldownT = ZONE_TRANSITION_COOLDOWN;
+
+      if (advanced && MG.UI && MG.UI.showToast) {
+        var c = MG.Customer.list[0];
+        var morning = c && MORNING_TOASTS[c.chapter];
+        if (morning) MG.UI.showToast(morning);
+      }
+
+      this._closingDay = false;
     },
 
     /* LAZY DINER STEP 5: 작별 시작. 한 번만 — _farewellStarted 가 곧 그 가드다.
@@ -831,6 +916,7 @@
       this.clueHeard = false;
       this._farewellStarted = false;   // LAZY DINER STEP 5: 엔딩도 처음부터
       this._farewellDone = false;
+      this._closingDay = false;        // LAZY DINER STEP 11
       if (MG.UI && MG.UI.hideSpeech) MG.UI.hideSpeech();
       if (MG.Customer && MG.Customer.init) MG.Customer.init();
 

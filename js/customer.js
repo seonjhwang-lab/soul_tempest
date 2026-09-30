@@ -24,22 +24,66 @@
       id: 'inspector',
       name: '손님',
       seat: 2,                                  // MG.Map.dinerSeats 의 가운데 자리
-      hungryLine: '…먹을 거 없으면 말 걸지 마.',
-      afterLine: '…라면, 나쁘지 않았어.',
       // STEP 5: 단서를 들은 뒤 문을 나서려는 플레이어에게 건네는 작별 한 줄.
       // 처음엔 "말 걸지 마" 라던 사람이 처음으로 "또" 를 말한다.
       farewellLine: '…라면. 또 끓여.',
+      /* STEP 10/11: 세 번의 방문(=세 밤). chapters[i] 가 i+1 번째 밤이다.
+           lines   — 라면을 건넸을 때 열리는 대화
+           hungry  — 이 밤의 차례인데 라면이 없을 때(WAITING) 건네는 한마디
+           after   — (마지막 밤만) 먹고 난 뒤에도 남아 있는 손님에게 말을 걸면 돌아오는
+                     한마디. 앞의 두 밤은 대화 끝에 손님이 자리를 떠나므로(LEFT) 없다.
+           thought — 대화가 끝난 직후 토스트로 뜨는 주인공의 혼잣말
+           arrive  — 이 밤을 위해 다이너에 들어왔을 때의 토스트(첫 밤은 없다)
+         앞의 두 밤은 대화가 닫힐 때 손님이 떠나고(SERVED → LEFT), 단서(clueHeard)는
+         마지막 밤의 대화가 끝날 때만 켜진다(그때 손님은 그대로 앉아 있다). */
       chapters: [
-        [
-          '(국물 냄새를 오래 맡는다)',
-          '…물. 어디서 떠 왔어?',
-          '(대답을 기다리지 않고 한 모금 마신다)',
-          '끓였네. …됐어.',
-          '예전에 물 검사하던 사람이야.',
-          '마지막으로 기록한 샘플이 이상했어. 수치가 너무 깨끗했거든.',
-          '기계가 고장 난 줄 알았지. 그래서 다시 안 갔어.',
-          '…북쪽 저수지. 아직 거기 있으려나.'
-        ]
+        {
+          lines: [
+            '(국물 냄새를 오래 맡는다)',
+            '…물. 어디서 떠 왔어?',
+            '(대답을 기다리지 않고 한 모금 마신다)',
+            '끓였네. …됐어.',
+            '면은 불었어.',
+            '…물은 괜찮았어.',
+            '…다음엔 덜 끓여.',
+            '(자리에서 일어나 나간다)'
+          ],
+          hungry: '…먹을 거 없으면 말 걸지 마.',
+          thought: '…왜 물부터 물어봤을까.',
+          arrive: null
+        },
+        {
+          lines: [
+            '…어제보단 낫네.',
+            '예전에 물 검사하던 사람이야.',
+            '강이든 우물이든. 떠 와서 재고, 적어 두고.',
+            '다 무너진 뒤에도 한동안 그 짓을 했어.',
+            '…누가 읽을 것도 아닌데.',
+            '(코트 안주머니를 한 번 만진다)',
+            '기록은… 아직 갖고 있어.',
+            '…오늘은 여기까지.',
+            '(자리에서 일어나 나간다)'
+          ],
+          hungry: '…아직이야?',
+          thought: '기록… 뭘 적어 뒀길래.',
+          arrive: '…그 손님이 또 와 있다.'
+        },
+        {
+          lines: [
+            '(안주머니에서 낡은 수첩을 꺼낸다)',
+            '마지막으로 기록한 샘플이 이상했어.',
+            '수치가 너무 깨끗했거든.',
+            '기계가 고장 난 줄 알았지. 그래서 다시 안 갔어.',
+            '…확인하기 싫었던 거겠지.',
+            '(수첩을 덮는다)',
+            '…북쪽 저수지.',
+            '아직 거기 있으려나.'
+          ],
+          hungry: '…물 끓는 소리가 안 들리네.',
+          after: '…왜 아직 서 있어.',
+          thought: '북쪽 저수지… 정말 깨끗한 곳이 남아 있다면?',
+          arrive: '…오늘도 같은 자리다.'
+        }
       ]
     }
   ];
@@ -51,8 +95,6 @@
   var INTERACT_LEAVE = 32;
 
   var ICON_SERVE = '🍜';   // 이 손님에게 지금 라면을 건넬 수 있을 때
-
-  var CLUE_THOUGHT = '북쪽 저수지… 정말 깨끗한 곳이 남아 있다면?';
 
   var C = {
     outline:   '#161320',
@@ -86,8 +128,9 @@
       for (var i = 0; i < DEFS.length; i++) {
         this.list.push({
           def: DEFS[i],
-          state: 'WAITING',      // WAITING | SERVED
+          state: 'WAITING',      // WAITING | SERVED | LEFT
           chapter: 0,
+          _announced: false,     // STEP 11: 오늘 arrive 토스트를 이미 띄웠는가
           _inRange: false,
           _promptShown: false,
           _promptIcon: null
@@ -115,6 +158,13 @@
         if (MG.Input && MG.Input.interactPressed && MG.UI && MG.UI.advanceSpeech) {
           MG.UI.advanceSpeech();
         }
+        return;
+      }
+
+      // STEP 11: 자리를 떠난 손님과는 상호작용할 수 없다 — 버튼도 뜨지 않는다.
+      if (c && c.state === 'LEFT') {
+        this.hidePrompt(c);
+        c._inRange = false;
         return;
       }
 
@@ -159,38 +209,87 @@
       if (MG.UI && MG.UI.hideInteract) MG.UI.hideInteract();
     },
 
-    /* CASE A: WAITING + meatRamen > 0 — 제공하고 이야기를 시작한다.
-       CASE B: WAITING + meatRamen === 0 — 재료가 없다는 토스트만.
-       CASE C: SERVED — 이미 먹었다는 짧은 토스트만.
+    /* CASE A: WAITING + meatRamen > 0 — 제공하고 이번 밤의 이야기를 시작한다.
+       CASE B: WAITING + meatRamen === 0 — 재료가 없다는 토스트만(이번 밤의 hungry).
+       CASE C: SERVED — 마지막 밤 이후에만 닿을 수 있다(앞의 두 밤은 LEFT 가 된다).
+               남아 있는 손님의 after 토스트만.
        meatRamen 은 성공했을 때만 줄어든다. state/chapter 는 제공하는 이 순간
        즉시 확정한다 — 대화 도중 구역을 나가거나 재시작해도 진행 상태가
-       어긋나지 않게 하려는 것이다. SERVED 가 되는 순간부터 카운터에 그릇이
-       그려진다(renderCounterItems). */
+       어긋나지 않게 하려는 것이다(chapter 는 "다음에 낼 밤"이라, SERVED 인 동안
+       방금 끝낸 밤은 chapter - 1 이다). SERVED 가 되는 순간부터 카운터에 그릇이
+       그려진다(renderCounterItems). 단서는 마지막 밤의 대화가 끝날 때만 켜진다. */
     interact: function (c) {
+      var chapters = c.def.chapters;
+      var last = chapters.length - 1;
+
       if (c.state === 'SERVED') {
-        if (MG.UI && MG.UI.showToast) MG.UI.showToast(c.def.afterLine);
+        var done = chapters[Math.min(Math.max(c.chapter - 1, 0), last)];
+        if (done.after && MG.UI && MG.UI.showToast) MG.UI.showToast(done.after);
         return;
       }
 
+      var idx = Math.min(c.chapter, last);
+      var night = chapters[idx];
+
       if (!MG.Game || MG.Game.meatRamen < 1) {
-        if (MG.UI && MG.UI.showToast) MG.UI.showToast(c.def.hungryLine);
+        if (MG.UI && MG.UI.showToast) MG.UI.showToast(night.hungry);
         return;
       }
 
       MG.Game.meatRamen -= 1;
       if (MG.UI && MG.UI.renderRamen) MG.UI.renderRamen(MG.Game.meatRamen);
 
-      var lines = c.def.chapters[c.chapter] || c.def.chapters[c.def.chapters.length - 1];
+      var isFinal = (idx === last);
       c.state = 'SERVED';
-      c.chapter += 1;
+      c.chapter = Math.min(c.chapter + 1, chapters.length);
       this.hidePrompt(c);
 
       if (MG.UI && MG.UI.showSpeech) {
-        MG.UI.showSpeech(c.def.name, lines, function () {
-          if (MG.Game) MG.Game.clueHeard = true;
-          if (MG.UI && MG.UI.showToast) MG.UI.showToast(CLUE_THOUGHT);
+        MG.UI.showSpeech(c.def.name, night.lines, function () {
+          // 마지막 밤: 단서를 얻고 손님은 그대로 앉아 있다(문 앞에서 작별이 이어진다).
+          // 앞의 두 밤: 대화가 닫히는 지금 손님이 떠난다 — 마지막 줄 "(자리에서 일어나
+          // 나간다)"를 읽은 뒤에 자리가 비고, 그릇도 함께 사라진다(SERVED 일 때만 그려진다).
+          if (isFinal) { if (MG.Game) MG.Game.clueHeard = true; }
+          else c.state = 'LEFT';
+          if (MG.UI && MG.UI.showToast) MG.UI.showToast(night.thought);
         });
       }
+    },
+
+    /* STEP 11: 밖에서 다이너로 들어왔다 — 토스트만 띄운다. 상태는 절대 바꾸지 않는다
+       (밤을 넘기는 것은 하루를 마치는 startNewDay 뿐이다). game.js 의 outside → diner
+       전환 분기가 부른다. 손님이 기다리는 중(WAITING)이고 첫 밤이 아니면, 그날의
+       arrive 토스트를 하루에 한 번만 띄운다 — 같은 날 나갔다 다시 들어와도 반복하지
+       않는다. 첫 입장, 먹지 못하고 나갔다 온 첫 밤, 이미 먹은 뒤에는 아무 일도 없다. */
+    onArriveDiner: function () {
+      var c = this.list[0];
+      if (!c || c.state !== 'WAITING' || c.chapter < 1) return;
+      if (c._announced || c.chapter >= c.def.chapters.length) return;
+
+      c._announced = true;
+      var arrive = c.def.chapters[c.chapter].arrive;
+      if (arrive && MG.UI && MG.UI.showToast) MG.UI.showToast(arrive);
+    },
+
+    /* STEP 11: 오늘 손님이 이미 떠났는가 — game.js 의 문 규칙이 읽는다. */
+    isGoneForToday: function () {
+      var c = this.list[0];
+      return !!c && c.state === 'LEFT';
+    },
+
+    /* STEP 11: 새 하루가 시작됐다 — 떠났던 손님이 다시 기다리는 상태가 된다.
+       chapter 는 건드리지 않는다(밤은 라면을 건네는 순간에만 넘어간다). LEFT 가
+       아니면(마지막 밤 이후 포함) 아무 일도 하지 않고 false 를 돌려준다. */
+    startNewDay: function () {
+      var c = this.list[0];
+      if (!c || c.state !== 'LEFT') return false;
+      if (c.chapter >= c.def.chapters.length) return false;
+
+      c.state = 'WAITING';
+      c._announced = false;
+      c._inRange = false;
+      c._promptIcon = null;
+      return true;
     },
 
     /* STEP 5: 작별 한 줄을 기존 대화 상자로 연다 — 새 대화 시스템이 아니다.
@@ -209,6 +308,7 @@
        자연히 화면에서 빠진다. */
     collect: function (out, cam) {
       var c = this.list[0];
+      if (c && c.state === 'LEFT') return out;   // STEP 11: 떠난 자리는 비어 있다
       var seat = this.seatOf(c);
       if (!seat) return out;
       if (seat.x < cam.x - 40 || seat.x > cam.x + cam.w + 40) return out;
