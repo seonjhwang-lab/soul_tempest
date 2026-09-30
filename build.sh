@@ -50,7 +50,7 @@ mkdir -p dist
   echo '<meta name="apple-mobile-web-app-capable" content="yes" />'
   echo '<meta name="mobile-web-app-capable" content="yes" />'
   echo '<meta name="description" content="달빛 숲의 수호자 — Moonlit Grove Prototype 0.1.0" />'
-  echo '<title>달빛 숲의 수호자</title>'
+  echo '<title>Lazy Diner</title>'
   echo "$FONT_LINKS"
   echo '<style>'
   echo "$STYLE_CSS"
@@ -68,7 +68,7 @@ mkdir -p dist
 # -------------------------------------------------------------- artifact.html
 # (Artifact 호스팅이 <!doctype>/<head>/<body> 골격을 자동으로 씌우므로 내용만 작성)
 {
-  echo '<title>달빛 숲의 수호자</title>'
+  echo '<title>Lazy Diner</title>'
   echo "$FONT_LINKS"
   echo '<style>'
   echo "$STYLE_CSS"

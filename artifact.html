@@ -1,4 +1,4 @@
-<title>달빛 숲의 수호자</title>
+<title>Lazy Diner</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&display=swap" rel="stylesheet" />
@@ -644,6 +644,7 @@ body.mg-diner .attack-button {
   font-size: clamp(12px, 2.6vh, 20px);
   color: var(--mg-leaf);
   letter-spacing: 0.24em;
+  word-break: keep-all;
 }
 
 .game-version {
@@ -961,9 +962,9 @@ body:not(.mg-playing) .ability-button {
         <!-- 타이틀 화면 -->
         <div id="overlay-title" class="overlay">
           <div class="overlay-inner">
-            <h1 class="game-title">달빛 숲</h1>
-            <p class="game-subtitle">달빛 숲의 수호자</p>
-            <button id="btn-start" class="ui-button" type="button">모험 시작</button>
+            <h1 class="game-title">Lazy Diner</h1>
+            <p class="game-subtitle">요리는 서툴러도, 불은 켠다</p>
+            <button id="btn-start" class="ui-button" type="button">가게 열기</button>
             <p class="game-version">Prototype 0.1.11</p>
           </div>
         </div>
@@ -997,7 +998,7 @@ body:not(.mg-playing) .ability-button {
                  새 입력 방식도 만들지 않는다(#ui-layer button 은 이미
                  pointer-events: auto 이고 click 하나면 터치/데스크톱 모두 동작한다).
                  문구/순서도 타이틀 화면과 같은 자리(문구 → 버튼 → 버전)에 맞췄다. -->
-            <button id="btn-complete-restart" class="ui-button" type="button">다시 모험하기</button>
+            <button id="btn-complete-restart" class="ui-button" type="button">처음부터 다시</button>
             <p class="complete-footer">Prototype 0.1 완료</p>
           </div>
         </div>
@@ -7364,6 +7365,16 @@ body:not(.mg-playing) .ability-button {
      나오고, 끝나면 다음 날 아침이 바깥에서 시작된다. 아침 토스트는 손님의 chapter
      ("다음에 낼 밤")로 고른다 — 1 이면 이제 둘째 날, 2 면 셋째 날이다. */
   var CLOSING_LINES = ['(불을 끄고 문을 잠근다)', '…내일도 문은 열어야지.'];
+
+  /* LAZY DINER STEP 15: 첫 1분을 설명 없이 알려 주는 한 번짜리 혼잣말과 화로 아이콘.
+     튜토리얼이 아니다 — 기존 토스트 슬롯을 쓰고, 첫날 안에 모두 소진된다. */
+  var HINT_HOLD_MS = 3200;
+  var HINT_START = '…또 재료가 떨어졌네. 뭐라도 잡아 와야 끓이지.';
+  var HINT_MEAT = '…고기다. 가게 가서 라면이나 끓여야지.';
+  var HINT_ENTER_MEAT = '…화로는 멀쩡하네. 어디 한번 끓여 볼까.';
+  var HINT_ENTER_EMPTY = '…화로는 멀쩡하다. 넣을 게 없을 뿐.';
+  var HINT_RAMEN = '…모양은 이래도 라면은 라면이다. 손님이 먹어 주려나.';
+  var ICON_STOVE = '🔥';
   var MORNING_TOASTS = { 1: '둘째 날 아침.', 2: '셋째 날 아침.' };
 
   var Game = {
@@ -7379,6 +7390,15 @@ body:not(.mg-playing) .ability-button {
        할 뿐 아무 일도 일으키지 않는다. 옛 코드는 그대로 남아 있어, 콘솔에서
        MG.Game.LEGACY_MOONSTONE_ENABLED = true 로 켜면 예전처럼 동작한다. */
     LEGACY_MOONSTONE_ENABLED: false,
+
+    /* LAZY DINER STEP 13: 옛 Moonlit 의 동료 모스키를 켜고 끄는 스위치. 꺼져 있는 것이
+       기본이다 — 이 프로토타입은 생존자 한 명과 손님 한 명의 이야기라, 덩굴에 묶인
+       생물이 보이거나 따라와 다이너까지 들어오면 안 된다. false 면 update() 가
+       Companion.update 를, render() 가 Companion.collect 를 건너뛰므로 모스키는
+       그려지지도, 영입되지도, 따라오지도 않는다(덩굴 다리/🌿 버튼도 함께 닿지 않는다).
+       companion.js 와 init() 호출은 그대로다 — 콘솔에서
+       MG.Game.LEGACY_MOSKI_ENABLED = true 로 켜면 예전처럼 동작한다. */
+    LEGACY_MOSKI_ENABLED: false,
 
     canvas: null,
     ctx: null,
@@ -7464,6 +7484,11 @@ body:not(.mg-playing) .ability-button {
        사망/부활로는 되돌아가지 않고 재시작에서만 false 로 돌아간다. */
     _farewellStarted: false,
     _farewellDone: false,
+
+    /* LAZY DINER STEP 15: 첫 1분의 "혼잣말" 네 개를 이미 보여 줬는가. 이 플레이어가 처음
+       설명을 봤다는 기록이라 restartSession 에서 되돌리지 않는다 — 같은 사람이 다시 하면
+       루프를 이미 아는 사람이다. 페이지를 새로 열면 자연히 처음 상태로 돌아간다. */
+    _hintSeen: { start: false, meat: false, enter: false, ramen: false },
 
     /* LAZY DINER STEP 11: 하루를 마치는 중(닫는 대사가 열린 순간부터 finishDay 까지).
        그동안 문 발판은 다시 반응하지 않는다 — 플레이어가 문 발판 위에 선 채로 대사가
@@ -7627,12 +7652,23 @@ body:not(.mg-playing) .ability-button {
       this.hitStopT = Math.max(this.hitStopT, duration);
     },
 
+    /* LAZY DINER STEP 15: 첫 1분의 혼잣말 한 번짜리 토스트. 이미 보여 줬으면 false —
+       호출한 쪽이 평소 토스트로 되돌아가면 된다. 기존 토스트 슬롯을 그대로 쓰므로
+       조작은 절대 막지 않고, 뒤이은 다른 토스트가 이걸 덮어써도 괜찮다. */
+    hintOnce: function (key, text, holdMs) {
+      if (this._hintSeen[key]) return false;
+      this._hintSeen[key] = true;
+      if (MG.UI && MG.UI.showToast) MG.UI.showToast(text, holdMs);
+      return true;
+    },
+
     /* 타이틀 화면에서 "모험 시작"을 눌렀을 때 */
     startAdventure: function () {
       this.state = 'PLAY';
       // PHASE 9 폴리시: 여기서부터 조작 컨트롤이 나타난다 (타이틀에서는 숨겨져 있었다)
       document.body.classList.add('mg-playing');
       if (MG.UI && MG.UI.hideTitle) MG.UI.hideTitle();
+      this.hintOnce('start', HINT_START, HINT_HOLD_MS);   // LAZY DINER STEP 15
     },
 
     /* 카메라 — 맵이 화면보다 크므로 플레이어를 따라가되 맵 밖은 보여주지 않는다 */
@@ -7714,7 +7750,8 @@ body:not(.mg-playing) .ability-button {
 
       if (MG.Player && MG.Player.update) MG.Player.update(dt);
       if (MG.Enemy && MG.Enemy.update) MG.Enemy.update(dt);
-      if (MG.Companion && MG.Companion.update) MG.Companion.update(dt);  // PHASE 9 STEP 2
+      // PHASE 9 STEP 2 / LAZY DINER STEP 13: 모스키는 옛 기능이 켜져 있을 때만 움직인다.
+      if (this.LEGACY_MOSKI_ENABLED && MG.Companion && MG.Companion.update) MG.Companion.update(dt);
       if (MG.Customer && MG.Customer.update) MG.Customer.update();      // LAZY DINER STEP 4-1
       this.updateZoneTransition(dt);  // LAZY DINER STEP 1
       this.updateMoonstone(dt);
@@ -7732,7 +7769,10 @@ body:not(.mg-playing) .ability-button {
        갱신한다(매 프레임이 아니라 값이 바뀌는 순간에만 — hearts 와 같은 방식). */
     addMeat: function (n) {
       this.meat += n;
-      if (MG.UI && MG.UI.showToast) MG.UI.showToast('고기 × ' + n + ' 획득');
+      // LAZY DINER STEP 15: 처음 얻는 고기만 혼잣말이 평소 토스트를 대신한다.
+      if (!this.hintOnce('meat', HINT_MEAT, HINT_HOLD_MS) && MG.UI && MG.UI.showToast) {
+        MG.UI.showToast('고기 × ' + n + ' 획득');
+      }
       if (MG.UI && MG.UI.renderMeat) MG.UI.renderMeat(this.meat);
     },
 
@@ -7804,6 +7844,13 @@ body:not(.mg-playing) .ability-button {
       // 나갔다 돌아오면 다음 밤이다(규칙은 customer.js 의 onArriveDiner 가 갖는다).
       if (next === 'diner' && MG.Customer && MG.Customer.onArriveDiner) {
         MG.Customer.onArriveDiner();
+      }
+
+      // LAZY DINER STEP 15: 처음 다이너에 들어왔을 때의 혼잣말 — 고기를 들고 왔는지에 따라
+      // 문구가 다르다(빈손이면 "끓여 볼까"가 어긋난다). 첫날 첫 입장에는 손님의
+      // 도착 토스트가 없으므로 겹치지 않는다.
+      if (next === 'diner') {
+        this.hintOnce('enter', this.meat > 0 ? HINT_ENTER_MEAT : HINT_ENTER_EMPTY, HINT_HOLD_MS);
       }
     },
 
@@ -8077,7 +8124,8 @@ body:not(.mg-playing) .ability-button {
     showStovePrompt: function () {
       if (this._stovePromptShown) return;
       this._stovePromptShown = true;
-      if (MG.UI && MG.UI.showInteract) MG.UI.showInteract();
+      // LAZY DINER STEP 15: 화로는 손님의 🍜 처럼 무엇과 상호작용하는지 아이콘으로 알린다.
+      if (MG.UI && MG.UI.showInteract) MG.UI.showInteract(ICON_STOVE);
     },
 
     hideStovePrompt: function () {
@@ -8096,7 +8144,10 @@ body:not(.mg-playing) .ability-button {
         this.meatRamen += 1;
         if (MG.UI && MG.UI.renderMeat) MG.UI.renderMeat(this.meat);
         if (MG.UI && MG.UI.renderRamen) MG.UI.renderRamen(this.meatRamen);
-        if (MG.UI && MG.UI.showToast) MG.UI.showToast('고기라면을 만들었다.');
+        // LAZY DINER STEP 15: 처음 만든 라면만 혼잣말이 평소 토스트를 대신한다.
+        if (!this.hintOnce('ramen', HINT_RAMEN, HINT_HOLD_MS) && MG.UI && MG.UI.showToast) {
+          MG.UI.showToast('고기라면을 만들었다.');
+        }
       } else {
         if (MG.UI && MG.UI.showToast) MG.UI.showToast('재료가 없다.');
       }
@@ -8338,7 +8389,8 @@ body:not(.mg-playing) .ability-button {
       // 나무/바위/모슬링/플레이어를 발 높이(y) 순으로 그려 앞뒤 관계를 만든다
       var props = MG.Map.collectProps([], cam);
       if (MG.Enemy && MG.Enemy.collect) MG.Enemy.collect(props, cam);
-      if (MG.Companion && MG.Companion.collect) MG.Companion.collect(props, cam);  // PHASE 9 STEP 2
+      // PHASE 9 STEP 2 / LAZY DINER STEP 13: 옛 기능이 꺼져 있으면 모스키는 그려지지 않는다.
+      if (this.LEGACY_MOSKI_ENABLED && MG.Companion && MG.Companion.collect) MG.Companion.collect(props, cam);
       if (MG.Customer && MG.Customer.collect) MG.Customer.collect(props, cam);     // LAZY DINER STEP 4-1
       if (MG.Player) {
         props.push({ y: MG.Player.y, kind: 'player' });

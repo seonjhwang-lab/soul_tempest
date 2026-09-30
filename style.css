@@ -639,6 +639,7 @@ body.mg-diner .attack-button {
   font-size: clamp(12px, 2.6vh, 20px);
   color: var(--mg-leaf);
   letter-spacing: 0.24em;
+  word-break: keep-all;
 }
 
 .game-version {
