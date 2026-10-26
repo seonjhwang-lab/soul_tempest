@@ -649,6 +649,77 @@
       } catch (e) {
         // 무음으로 넘어간다
       }
+    },
+
+    /* 셋째 유물의 파동이 날아가는 소리 — 맑고 짧게 올라가는 휘파람. */
+    playBeam: function () {
+      if (!this.ctx) return;
+      try {
+        var ctx = this.ctx, now = ctx.currentTime;
+        var osc = ctx.createOscillator();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(700, now);
+        osc.frequency.exponentialRampToValueAtTime(1900, now + 0.12);
+        var g = ctx.createGain();
+        g.gain.setValueAtTime(0.0001, now);
+        g.gain.exponentialRampToValueAtTime(0.12, now + 0.01);
+        g.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
+        osc.connect(g).connect(ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.18);
+      } catch (e) {}
+    },
+
+    /* 둘째 보스의 단단한 껍질에 막힌 소리 — 모슬링 피격("톡")과 다른, 높고 쇳소리 나는 "캉". */
+    playShellClink: function () {
+      if (!this.ctx) return;
+      try {
+        var ctx = this.ctx, now = ctx.currentTime;
+        var notes = [1480, 2230];
+        for (var i = 0; i < notes.length; i++) {
+          var osc = ctx.createOscillator();
+          osc.type = 'triangle';
+          osc.frequency.setValueAtTime(notes[i], now);
+          var g = ctx.createGain();
+          g.gain.setValueAtTime(0.0001, now);
+          g.gain.exponentialRampToValueAtTime(0.14, now + 0.004);
+          g.gain.exponentialRampToValueAtTime(0.0001, now + 0.11);
+          osc.connect(g).connect(ctx.destination);
+          osc.start(now);
+          osc.stop(now + 0.12);
+        }
+      } catch (e) {}
+    },
+
+    /* 돌진이 돌기둥에 부딪혀 껍질이 갈라지는 소리 — 낮은 쿵 + 깨지는 노이즈. */
+    playShellCrack: function () {
+      if (!this.ctx) return;
+      try {
+        var ctx = this.ctx, now = ctx.currentTime;
+        var osc = ctx.createOscillator();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(150, now);
+        osc.frequency.exponentialRampToValueAtTime(48, now + 0.22);
+        var og = ctx.createGain();
+        og.gain.setValueAtTime(0.4, now);
+        og.gain.exponentialRampToValueAtTime(0.0001, now + 0.26);
+        osc.connect(og).connect(ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.28);
+        if (this._noiseBuffer) {
+          var n = ctx.createBufferSource();
+          n.buffer = this._noiseBuffer;
+          var hp = ctx.createBiquadFilter();
+          hp.type = 'highpass';
+          hp.frequency.value = 900;
+          var ng = ctx.createGain();
+          ng.gain.setValueAtTime(0.3, now);
+          ng.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
+          n.connect(hp).connect(ng).connect(ctx.destination);
+          n.start(now);
+          n.stop(now + 0.2);
+        }
+      } catch (e) {}
     }
   };
 

@@ -2,197 +2,125 @@
 <html lang="ko">
 <head>
 <meta charset="UTF-8" />
-<!-- PHASE 12 STEP 1 FIX 2: interactive-widget=resizes-content 를 도로 뺐다.
-     그 값을 주면 키보드가 레이아웃 뷰포트까지 줄이는데, 그러면 Game.resize() 가
-     비율 고정 무대를 통째로 다시 맞춘다(375x667 -> 약 264x470). 입력창은 보였지만
-     게임 화면 전체가 작아지며 크게 움직여 실기 영상에서 "화면이 위아래로 크게
-     이동한다"로 나타났다. 키보드 대응은 무대를 건드리지 않고 완료 오버레이만
-     보이는 높이에 맞추는 쪽으로 옮겼다(feedback.js 의 syncKeyboardInset). -->
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
-<meta name="theme-color" content="#0b1410" />
-<meta name="apple-mobile-web-app-capable" content="yes" />
-<meta name="mobile-web-app-capable" content="yes" />
-<meta name="description" content="달빛 숲의 수호자 — Moonlit Grove Prototype 0.1.11" />
-<title>Lazy Diner</title>
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&display=swap" rel="stylesheet" />
-<link rel="stylesheet" href="style.css?v=0.1.11" />
+<meta name="theme-color" content="#060913" />
+<meta name="description" content="SOUL TEMPEST : LEGEND OF THE HUNTER — 다크 소울 · 몬스터 헌터 · 젤다 · 바람의 나라의 손맛을 담은 픽셀 수렵 액션 RPG" />
+<title>SOUL TEMPEST : Legend of the Hunter</title>
+<link rel="stylesheet" href="style.css" />
 </head>
 <body>
+<div id="app">
+  <div id="stage">
+    <canvas id="game" width="360" height="640"></canvas>
+    <!-- 360×640 논리 상자(무대 크기에 맞춰 통째로 확대/축소) -->
+    <div id="ui">
 
-  <!-- 게임 전체 루트: 캔버스 + 오버레이 UI가 같은 좌표계 위에 겹쳐진다 -->
-  <div id="game-root">
-
-    <!-- 내부 해상도 360x640 (9:16, 세로 우선). CSS 크기는 JS가 화면비를 유지하며 계산 -->
-    <div id="stage">
-      <canvas id="game-canvas" width="360" height="640"></canvas>
-
-      <!-- 캔버스 위에 겹치는 DOM UI 레이어 (한글 텍스트 가독성을 위해 DOM 사용) -->
-      <div id="ui-layer">
-
-        <!-- HUD: 좌상단 하트(PHASE 7), 우상단 버전 -->
-        <div id="hud">
-          <div id="hud-hearts" class="hud-slot hud-left"></div>
-          <!-- LAZY DINER STEP 2: 하트 바로 아래, 아주 작은 고기 개수 표시.
-               기존 HUD 슬롯 규약(.hud-slot .hud-left) 을 그대로 쓰고,
-               자리만 .hud-meat 로 한 줄 내린다. -->
-          <div id="hud-meat" class="hud-slot hud-left hud-meat">🍖 0</div>
-          <!-- LAZY DINER STEP 3: 고기 바로 아래, 요리 결과물 개수. -->
-          <div id="hud-ramen" class="hud-slot hud-left hud-ramen">🍜 0</div>
-          <div id="hud-version" class="hud-slot hud-right">v0.1.11</div>
-        </div>
-
-        <!-- PHASE 8: 임시 알림(달의 돌 발견 등). ui.js 의 showToast() 가
-             내용을 채우고 스스로 사라진다 — 상시 목표 패널이 아니다. -->
-        <div id="hud-toast" class="hud-toast" hidden></div>
-
-        <!-- LAZY DINER STEP 4-1/4-3b: 손님과의 짧은 대화.
-             #speech-layer 는 화면 전체를 덮는 투명한 탭 받이다 — 대화가 열려
-             있는 동안에만 보이고, 어디를 눌러도(대화 상자 위든 아니든) 다음 줄로
-             넘어간다. #speech-box 는 보여주기만 하는 패널(pointer-events: none)이라
-             그 위를 눌러도 아래 레이어가 받는다 — 리스너가 한 곳뿐이라 한 번 누르면
-             정확히 한 줄이다. 다이얼로그 엔진이 아니다. -->
-        <div id="speech-layer" class="speech-layer" hidden></div>
-        <div id="speech-box" class="speech-box" hidden>
-          <span id="speech-name" class="speech-name"></span>
-          <span id="speech-text" class="speech-text"></span>
-          <span class="speech-hint">▼</span>
-        </div>
-
-        <!-- PHASE 8.1: 정화 완료 문구. 잠깐 떴다 스스로 사라지며 조작을
-             가리지 않는다(pointer-events: none). 게임 오버 메뉴가 아니다. -->
-        <div id="hud-victory" class="hud-victory" hidden></div>
-
-        <!-- PHASE 9.1: 정화 후 시작 공터로 돌아오면 뜨는 재시작 권유.
-             "모험 시작" 버튼과 같은 click 경로를 쓰려고 button 을 쓴다
-             (#ui-layer button 은 이미 pointer-events: auto). 모달/메뉴가 아니라
-             탭할 수 있는 한 줄 문구다. -->
-        <button id="hud-restart" class="hud-restart" type="button" hidden></button>
-
-        <!-- DEBUG_MOBILE_LAYOUT 이 true 일 때만 game.js 가 내용을 채우고 보여준다 -->
-        <pre id="debug-panel" class="debug-panel" hidden></pre>
-
-        <!-- 터치 컨트롤 레이어 (모바일 전용, input.js 가 제어) -->
-        <div id="touch-layer">
-          <div id="joystick-zone" class="touch-controls"></div>
-          <div id="joystick-base" class="touch-controls joystick-base" hidden>
-            <div id="joystick-knob" class="joystick-knob"></div>
-          </div>
-          <button id="btn-attack" class="touch-controls attack-button" type="button" aria-label="공격">⚔</button>
-
-        <!-- PHASE 9 STEP 1: 상황별 상호작용 버튼 (GAME_DESIGN.md 의 PC "E: 상호작용"
-             과 같은 입력). 기본은 hidden 이고 MG.UI.showInteract() 가 부를 때만
-             나타난다. 새 입력 레이어를 만들지 않고 기존 #touch-layer 안에 둔다. -->
-        <button id="btn-interact" class="touch-controls interact-button" type="button" aria-label="상호작용" hidden>👋</button>
-
-        <!-- PHASE 10 STEP 2: 모스키 능력(덩굴 다리) 버튼. GAME_DESIGN.md 의 PC "Q"
-             와 같은 입력이다. 상호작용 버튼(👋)과 뜻이 다르므로 자리·색·아이콘을
-             모두 다르게 두었다 — 공격 버튼 왼쪽에 놓여 서로 겹치지 않는다.
-             기본은 hidden 이고 MG.UI.showAbility() 가 부를 때만 나타난다. -->
-        <button id="btn-ability" class="touch-controls ability-button" type="button" aria-label="덩굴 다리" hidden>🌿</button>
-        </div>
-
-        <!-- 타이틀 화면 -->
-        <div id="overlay-title" class="overlay">
-          <div class="overlay-inner">
-            <h1 class="game-title">Lazy Diner</h1>
-            <p class="game-subtitle">요리는 서툴러도, 불은 켠다</p>
-            <button id="btn-start" class="ui-button" type="button">가게 열기</button>
-            <p class="game-version">Prototype 0.1.11</p>
+      <!-- HUD: 왼쪽 위 무기·마법 칸 + HP/MP/SP, 그 아래 골드·에스트 / 오른쪽 위 📜 / 위 가운데 보스 바 · 한 줄 리본 -->
+      <div id="hud">
+        <div class="hud-tl">
+          <button id="hud-weapon" class="slot" type="button" aria-label="장착 무기"></button>
+          <button id="hud-spell" class="slot slot-spell" type="button" aria-label="비전 마법(눌러서 바꾸기)"></button>
+          <div id="hud-bars" class="bars">
+            <div class="bar bar-hp"><i id="bar-hp"></i><b id="bar-hp-t"></b></div>
+            <div class="bar bar-mp"><i id="bar-mp"></i></div>
+            <div class="bar bar-sp"><i id="bar-sp"></i></div>
           </div>
         </div>
-
-        <!-- PHASE 11 STEP 2: 프로토타입 완료 화면.
-             MG.Game.gameComplete 를 읽어 MG.UI.showComplete() 가 띄우는 표시
-             전용 계층이다 — 버튼도, 입력도, 게임 상태도 여기에 없다.
-             타이틀 화면과 같은 .overlay / .overlay-inner 구조를 그대로 재사용한다.
-             STEP 5: 문구는 Lazy Diner 의 것이다 — 이번 판에 실제로 한 일(고기 →
-             고기라면 → 단서)만 목록으로 보여준다. -->
-        <div id="overlay-complete" class="overlay overlay-complete" hidden>
-          <div class="overlay-inner">
-            <p class="complete-eyebrow">Lazy Diner · Prototype 0.1</p>
-            <p class="complete-line">“그날 밤, 처음으로 누군가 내 라면을 먹었다.”</p>
-            <ul class="complete-list">
-              <li>🍖 고기</li>
-              <li>🍜 고기라면</li>
-              <li>💧 북쪽 저수지</li>
-            </ul>
-            <p class="complete-footer">— 계속 —</p>
-            <!-- PHASE 12 ROOT-CAUSE FIX: 피드백 폼은 이 안에 두지 않는다.
-                 완료 화면은 #game-root(position:fixed) 안에 있고 body 는
-                 overflow:hidden / touch-action:none 이라, 안드로이드 Chrome 이
-                 "포커스된 입력을 문서 스크롤로 끌어올리는" 네이티브 처리를 할 수
-                 없다. 그래서 폼은 #game-root 바깥의 독립 화면으로 옮겼다.
-                 여기에는 그 화면을 여는 버튼만 남는다. -->
-            <button id="btn-open-feedback" class="feedback-submit" type="button">피드백 남기기</button>
-
-            <!-- PHASE 11 STEP 3: 기존 MG.Game.restartSession() 으로 이어지는 유일한 출구.
-                 타이틀의 "모험 시작"과 같은 .ui-button 을 그대로 쓴다 — 새 스타일도,
-                 새 입력 방식도 만들지 않는다(#ui-layer button 은 이미
-                 pointer-events: auto 이고 click 하나면 터치/데스크톱 모두 동작한다).
-                 문구/순서도 타이틀 화면과 같은 자리(문구 → 버튼 → 버전)에 맞췄다. -->
-            <button id="btn-complete-restart" class="ui-button" type="button">처음부터 다시</button>
-            <p class="complete-footer">Prototype 0.1 완료</p>
-          </div>
+        <div class="hud-row2"><span id="hud-gold" class="hud-chip"></span><span id="hud-estus" class="hud-chip"></span></div>
+        <button id="btn-status" class="status-btn" type="button" aria-label="장비·도감 (Tab)"><i class="pxi" data-ic="scroll">📜</i><span>장비·도감</span></button>
+        <div id="boss-bar" hidden>
+          <div id="bb-name" class="bb-name"></div>
+          <div class="bb-hp"><i id="bb-hp"></i></div>
+          <div class="bb-part"><span id="bb-pic" class="bb-pic"></span><div class="bb-pbar"><i id="bb-pt"></i></div></div>
         </div>
-
-      </div>
-    </div>
-  </div>
-
-  <!-- ==========================================================================
-       PHASE 12 ROOT-CAUSE FIX: 독립 피드백 화면.
-
-       #game-root 의 형제로, 게임 무대/캔버스 바깥에 있다. position 은 relative
-       (일반 문서 흐름)이라 스크롤이 문서 스크롤로 일어나고, 그래서 안드로이드
-       Chrome 의 기본 키보드 처리 — 포커스된 입력을 알아서 화면 안으로 끌어올리는
-       동작 — 가 여느 웹페이지와 똑같이 그대로 작동한다.
-       게임 쪽(#game-root)은 position:fixed 로 제자리에 남아 있으므로 캔버스가
-       줄어들거나 움직이지 않는다. 여기서는 visualViewport 도, Game.resize() 도,
-       키보드 높이 보정도 전혀 쓰지 않는다.
-       ========================================================================== -->
-  <div id="feedback-screen" hidden>
-    <div class="feedback-inner">
-      <p class="feedback-title">피드백 남기기</p>
-
-      <p class="feedback-label">재미있었나요?</p>
-      <div id="feedback-rating" class="rating-row" role="group" aria-label="재미 점수">
-        <button class="rating-btn" type="button" data-score="1" aria-pressed="false">1</button>
-        <button class="rating-btn" type="button" data-score="2" aria-pressed="false">2</button>
-        <button class="rating-btn" type="button" data-score="3" aria-pressed="false">3</button>
-        <button class="rating-btn" type="button" data-score="4" aria-pressed="false">4</button>
-        <button class="rating-btn" type="button" data-score="5" aria-pressed="false">5</button>
+        <div id="ribbon" hidden></div>
       </div>
 
-      <p class="feedback-label">자유 의견</p>
-      <textarea id="feedback-comment" class="feedback-text" rows="4"
-                placeholder="하고 싶은 말을 남겨주세요" aria-label="자유 의견"></textarea>
+      <!-- 조작(v81): 왼쪽 절반 어디든 가상 조이스틱 / 실제 화면 오른쪽 아래 모서리에 밀착한 아크 버튼 4개(양손 엄지 자리) -->
+      <div id="ctl">
+        <div id="joy-zone"><div id="joy-base"><div id="joy-knob"></div></div></div>
+        <div id="act-pad" class="act-pad">
+        <button id="btn-act" class="act-btn" data-pad="X" type="button" aria-label="공격 (꾹 누르면 모아베기)"><span id="act-ic" class="act-ic"><i class="pxb" data-ic="btn_attack">⚔</i></span><span id="act-lab" class="act-lab"></span></button>
+        <button id="btn-roll" class="arc-btn btn-roll" data-pad="Y" type="button" aria-label="구르기 회피"><i class="pxb" data-ic="btn_dash">🪽</i></button>
+        <button id="btn-magic" class="arc-btn btn-magic" data-pad="B" type="button" aria-label="비전 마법"><i class="rbb" data-ic="btn_magic">✨</i><b id="magic-cost" class="btn-badge"></b><span id="magic-cd" class="btn-cd" hidden><b id="magic-cd-t"></b></span></button>
+        <button id="btn-estus" class="arc-btn btn-estus" data-pad="LB" type="button" aria-label="에스트 물약"><i class="rbb" data-ic="btn_estus">🧪</i><b id="estus-n" class="btn-badge"></b></button>
+        </div>
+      </div>
 
-      <button id="btn-feedback-submit" class="feedback-submit" type="button">피드백 보내기</button>
-      <p id="feedback-status" class="feedback-status" hidden>피드백이 저장되었습니다. 고맙습니다!</p>
+      <!-- 사냥꾼의 대장간: 위 무기 계보 카드 / 가운데 설명 · 작업대(캔버스, 직접 누르기) / 아래 버튼 -->
+      <div id="forge-ui" hidden>
+        <div class="fg-head"><span class="fg-title">🔨 사냥꾼의 대장간</span><span id="fg-gold" class="fg-gold"></span><button id="fg-close" class="fg-x" type="button" aria-label="나가기 (Esc)">✖</button></div>
+        <div id="fg-tree" class="fg-tree"></div>
+        <div id="fg-detail" class="fg-detail"></div>
+        <div id="fg-hit" class="fg-hit"></div>
+        <div id="fg-actions" class="fg-actions"></div>
+      </div>
 
-      <button id="btn-feedback-back" class="feedback-back" type="button">완료 화면으로 돌아가기</button>
+      <!-- 📜 장비 · 소재 · 무기 도감 -->
+      <div id="status-ui" class="modal" hidden role="dialog" aria-label="장비·도감">
+        <div class="md-box">
+          <div class="md-head"><button class="st-tab is-on" data-tab="gear" type="button">⚔️ 장비</button><button class="st-tab" data-tab="mats" type="button">🎒 소재</button><button class="st-tab" data-tab="codex" type="button">📖 무기 도감</button><button id="st-close" class="md-x" type="button" aria-label="닫기">✖</button></div>
+          <div id="st-body" class="md-body"></div>
+        </div>
+      </div>
+
+      <!-- v79 화톳불 전송(Fast Travel): 쉬고 나면 다른 화톳불로 순간이동 -->
+      <div id="warp-ui" class="modal modal-warp" hidden role="dialog" aria-label="화톳불 전송">
+        <div class="wp-box"><div class="wp-title">🔥 화톳불 전송 — 영혼의 폭풍을 타고 갈 곳</div><div id="wp-list" class="wp-list"></div><button id="wp-stay" class="wp-stay" type="button">이곳에 머무르기</button></div>
+      </div>
+
+      <!-- 고대 비석: 마법 각인 3택 1 -->
+      <div id="rune-ui" class="modal" hidden role="dialog" aria-label="고대 마법 각인">
+        <div class="rn-box"><div class="rn-title">🗿 고대 비석이 빛난다 — 각인 하나를 새겨라</div><div id="rn-cards" class="rn-cards"></div></div>
+      </div>
+
+      <!-- v82 방랑 NPC 대화 바: 화면 아래 가운데의 슬림한 반투명 바(아이콘 · 이름 · 대사 2줄 · [기능 실행] · [닫기]) — 시간은 멈추지 않고, 걸어서 멀어지면 닫힌다 -->
+      <div id="talk-ui" class="talk" hidden role="dialog" aria-label="대화">
+        <div class="tk-row"><span id="tk-ic" class="tk-ic"></span><div class="tk-text"><b id="tk-name" class="tk-name"></b><p id="tk-l1" class="tk-line"></p><p id="tk-l2" class="tk-line"></p></div></div>
+        <div class="tk-acts"><span id="tk-acts" class="tk-fns"></span><button id="tk-close" class="tk-close" type="button">닫기</button></div>
+      </div>
+
+      <!-- 타이틀(v78) 『SOUL TEMPEST : LEGEND OF THE HUNTER』: 부서진 폭풍의 고리 엠블럼 · 금빛 장식선 · 세리프 로고 · 부제(시트에서 각각 잘라 낸 그림) ·
+           버튼 · 버전(오른쪽 아래). 배경(칠흑의 심연 · 유적 돌바닥 · 안개 · 화톳불과 기사 · 황금 재)은 캔버스 -->
+      <div id="title-ui">
+        <div class="tt-col">
+        <div id="tt-emblem" class="tt-emblem"></div>
+        <div id="tt-div1" class="tt-div tt-div1" aria-hidden="true"></div>
+        <h1 class="tt-logo"><span class="sr-only">SOUL TEMPEST : LEGEND OF THE HUNTER</span><span id="tt-logo" aria-hidden="true"></span></h1>
+        <div id="tt-sub" class="tt-sub" aria-hidden="true"></div>
+        <div id="tt-div2" class="tt-div tt-div2" aria-hidden="true"></div>
+        <button id="btn-continue" class="tt-btn" type="button" hidden>이어서 하기</button>
+        <button id="btn-new" class="tt-btn" type="button">새로 시작</button>
+        </div>
+        <p id="tt-version" class="tt-version"></p>
+      </div>
+      <!-- v86 시네마틱(오프닝 · 진 엔딩 크레딧): 그림은 캔버스 — 여기는 스킵만(오른쪽 위 버튼 · 화면 어디든 터치 · ESC) -->
+      <div id="cine-ui" hidden><button id="cine-skip" type="button" aria-label="컷씬 건너뛰기 (ESC)">스킵 ⏩</button></div>
     </div>
   </div>
-
-  <!-- 시스템 순서대로 로드 (클래식 스크립트: file:// 로도 열린다).
-       쿼리스트링 ?v= 는 캐시 버스터다 — 모바일 브라우저가 개발 서버의
-       Cache-Control: no-store 를 무시하고 이전 방문 때 받은 js/*.js 를 재사용하는
-       문제(버전/전투 로직이 옛날 것으로 실행됨)를 막기 위함이다. 버전을 올릴 때마다
-       이 값도 js/game.js 의 VERSION 과 같은 값으로 같이 올려야 한다. -->
-  <script src="js/audio.js?v=0.1.11"></script>
-  <script src="js/collision.js?v=0.1.11"></script>
-  <script src="js/map.js?v=0.1.11"></script>
-  <script src="js/input.js?v=0.1.11"></script>
-  <script src="js/combat.js?v=0.1.11"></script>
-  <script src="js/player.js?v=0.1.11"></script>
-  <script src="js/enemy.js?v=0.1.11"></script>
-  <script src="js/companion.js?v=0.1.11"></script>
-  <script src="js/customer.js?v=0.1.11"></script>
-  <script src="js/feedback.js?v=0.1.11"></script>
-  <script src="js/ui.js?v=0.1.11"></script>
-  <script src="js/game.js?v=0.1.11"></script>
-  <script src="js/main.js?v=0.1.11"></script>
+</div>
+<script src="js/core.js"></script>
+<script src="js/data.js"></script>
+<script src="js/audio.js"></script>
+<script src="js/sfx.js"></script>
+<script src="js/sprites.js"></script>
+<script src="js/save.js"></script>
+<script src="js/fx.js"></script>
+<script src="js/world.js"></script>
+<script src="js/input.js"></script>
+<script src="js/combat.js"></script>
+<script src="js/player.js"></script>
+<script src="js/enemy.js"></script>
+<script src="js/boss.js"></script>
+<script src="js/magic.js"></script>
+<script src="js/loot.js"></script>
+<script src="js/gimmick.js"></script>
+<script src="js/npc.js"></script>
+<script src="js/companion.js"></script>
+<script src="js/tempest.js"></script>
+<script src="js/forge.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/game.js"></script>
+<script src="js/main.js"></script>
 </body>
 </html>

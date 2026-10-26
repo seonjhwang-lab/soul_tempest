@@ -13,14 +13,11 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 JS_FILES=(
-  js/audio.js js/collision.js js/map.js js/input.js js/combat.js
-  js/player.js js/enemy.js js/companion.js js/customer.js js/feedback.js js/ui.js
-  js/game.js js/main.js
+  js/core.js js/data.js js/audio.js js/sfx.js js/sprites.js js/save.js js/fx.js js/world.js js/input.js js/combat.js
+  js/player.js js/enemy.js js/boss.js js/magic.js js/loot.js js/gimmick.js js/npc.js js/companion.js js/tempest.js js/forge.js js/ui.js js/story.js js/game.js js/main.js
 )
 
-FONT_LINKS='<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&display=swap" rel="stylesheet" />'
+FONT_LINKS=''   # 리부트: 외부 글꼴 없음 — Galmuri11 을 번들에 내장한다
 
 # index.html <body> ~ </body> 내용을 추출하고, js/*.js 를 불러오는 <script src> 줄은 제거한다
 # (같은 내용을 아래에서 인라인 <script> 로 대체하기 때문)
@@ -28,6 +25,11 @@ BODY_INNER="$(awk '/<body>/{f=1;next}/<\/body>/{f=0}f' index.html \
   | grep -v '<script src="js/')"
 
 STYLE_CSS="$(cat style.css)"
+# v73: Galmuri 픽셀 폰트를 번들에 내장(Artifact 의 보안 정책이 외부 폰트를 막는다) — CSS 의 상대 경로를 data URI 로 바꾼다
+if [ -f assets/fonts/Galmuri11.woff2 ]; then
+  FONT_B64="$(base64 -w0 assets/fonts/Galmuri11.woff2)"
+  STYLE_CSS="${STYLE_CSS//"url('assets/fonts/Galmuri11.woff2')"/"url(data:font/woff2;base64,${FONT_B64})"}"
+fi
 
 JS_BUNDLE=""
 for f in "${JS_FILES[@]}"; do
@@ -46,11 +48,11 @@ mkdir -p dist
   echo '<head>'
   echo '<meta charset="UTF-8" />'
   echo '<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />'
-  echo '<meta name="theme-color" content="#0b1410" />'
+  echo '<meta name="theme-color" content="#060913" />'
   echo '<meta name="apple-mobile-web-app-capable" content="yes" />'
   echo '<meta name="mobile-web-app-capable" content="yes" />'
-  echo '<meta name="description" content="달빛 숲의 수호자 — Moonlit Grove Prototype 0.1.0" />'
-  echo '<title>Lazy Diner</title>'
+  echo '<meta name="description" content="검과 마법 — 다크 소울 · 몬스터 헌터 · 젤다 · 바람의 나라의 손맛을 담은 픽셀 수렵 액션 RPG" />'
+  echo '<title>SOUL TEMPEST : Legend of the Hunter</title>'
   echo "$FONT_LINKS"
   echo '<style>'
   echo "$STYLE_CSS"
@@ -68,7 +70,7 @@ mkdir -p dist
 # -------------------------------------------------------------- artifact.html
 # (Artifact 호스팅이 <!doctype>/<head>/<body> 골격을 자동으로 씌우므로 내용만 작성)
 {
-  echo '<title>Lazy Diner</title>'
+  echo '<title>SOUL TEMPEST : Legend of the Hunter</title>'
   echo "$FONT_LINKS"
   echo '<style>'
   echo "$STYLE_CSS"

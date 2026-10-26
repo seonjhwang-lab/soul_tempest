@@ -1,316 +1,162 @@
 /* ==========================================================================
-   input.js — 키보드 / 터치 입력
-   PHASE 1 범위: 키 상태 추적과 정규화된 이동 axis
-   PHASE 3 범위: 모바일 가상 조이스틱(좌하단) + 공격 버튼 플레이스홀더(우하단)
-     - Pointer Events 로 터치/마우스를 동일하게 처리한다
-     - 조이스틱은 터치 영역 안 아무 곳이나 짚으면 그 자리에 즉시 나타나는
-       "플로팅" 방식이라 반응이 즉각적이다
-     - 공격 버튼은 시각적 눌림 상태와 1프레임 엣지 트리거만 제공한다.
-       실제 공격 판정(히트박스/데미지)은 PHASE 5 combat.js 의 몫이다.
+   input.js — 키보드 + 터치(왼쪽 가상 조이스틱, 오른쪽 아크 버튼 4개)
+   버튼 하나 = { down(누르고 있다), pressed(이번 프레임에 눌렀다), released(이번 프레임에 뗐다), heldT(누른 시간) }
+     act   ⚔️ 공격/상호작용 — J · Space · E (꾹 누르면 모아베기)
+     roll  🪽 구르기       — K · Shift
+     magic ✨ 비전 마법     — L
+     estus 🧪 에스트       — H · Q
+     cycle   마법 바꾸기   — R (터치: HUD 의 마법 아이콘)
+     menu  📜 장비·도감     — Tab · I        esc — Esc
+   v86 게임패드(Gamepad API · 표준 배치 — Xbox / PS / 블루투스 패드):
+     왼쪽 스틱 · 십자키 = 이동(창이 열려 있으면 항목 고르기) · A(아래) = 대화 · 조사 · 상호작용 · 메뉴 선택 · X(왼쪽) = ⚔️ 공격(탭 평타 · 홀드 특수기/모아베기)
+     Y(위) = 🪽 구르기 · B(오른쪽) = ✨ 비전 마법(창에서는 닫기) · LB / LT = 🧪 에스트 · RB / RT = 🔥 화톳불 전송(화톳불 곁) · START = 📜 · SELECT = 마법 바꾸기
+   v86 햅틱: rumble(ms, 세기) — navigator.vibrate + 패드 진동 모터(vibrationActuator). 상쇄 · 진 모아베기 적중 · 부위 파괴 · 피격 때 울린다
    ========================================================================== */
 (function (global) {
   'use strict';
-
-  var MG = global.MG = global.MG || {};
-
-  // 게임에서 사용하는 키만 브라우저 기본 동작(스크롤 등)을 막는다
-  var BLOCKED = {
-    ArrowUp: 1, ArrowDown: 1, ArrowLeft: 1, ArrowRight: 1, Space: 1
+  var MG = global.MG;
+  var KEYMAP = {
+    KeyJ: 'act', Space: 'act', KeyE: 'act', KeyK: 'roll', ShiftLeft: 'roll', ShiftRight: 'roll', KeyL: 'magic', KeyH: 'estus', KeyQ: 'estus', KeyR: 'cycle',
+    Tab: 'menu', KeyI: 'menu', Escape: 'esc'
   };
-
-  var JOY_RADIUS = 40;   // 조이스틱 최대 이동 반경(px, 화면 좌표)
-  var JOY_DEADZONE = 6;  // 중심 부근 흔들림 무시 반경(px)
+  var MOVE = { KeyW: [0, -1], ArrowUp: [0, -1], KeyS: [0, 1], ArrowDown: [0, 1], KeyA: [-1, 0], ArrowLeft: [-1, 0], KeyD: [1, 0], ArrowRight: [1, 0] };
+  var NAMES = ['act', 'roll', 'magic', 'estus', 'cycle', 'menu', 'esc'];
+  /* v86 표준 게임패드 버튼 번호: 0 A · 1 B · 2 X · 3 Y · 4 LB · 5 RB · 6 LT · 7 RT · 8 SELECT · 9 START · 12~15 십자키(위 · 아래 · 왼쪽 · 오른쪽) */
+  var PAD = { A: 0, B: 1, X: 2, Y: 3, LB: 4, RB: 5, LT: 6, RT: 7, SELECT: 8, START: 9, UP: 12, DOWN: 13, LEFT: 14, RIGHT: 15 };
+  var PAD_MAP = [['X', 'act'], ['Y', 'roll'], ['LB', 'estus'], ['LT', 'estus'], ['SELECT', 'cycle'], ['START', 'menu']];   // 언제나 같은 뜻인 버튼(A · B · RB · RT 는 상황에 따라)
+  var PAD_GUIDE = [['X', '⚔️ 공격 (탭 평타 · 홀드 특수기)'], ['Y', '🪽 구르기 · 회피'], ['B', '✨ 비전 마법 · 창 닫기'], ['A', '💬 대화 · 조사 · 상호작용 · 선택'], ['LB / LT', '🧪 에스트 물약'], ['RB / RT', '🔥 화톳불 전송 (화톳불 곁)'], ['L 스틱 / 십자키', '이동 · 메뉴 고르기'], ['START', '📜 장비 · 도감'], ['SELECT', '마법 바꾸기']];
 
   var Input = {
-    keys: {},                  // code -> true/false
-    axis: { x: 0, y: 0 },      // 정규화된 이동 입력 (-1 ~ 1), 키보드/터치 통합
-    attackPressed: false,      // 공격 버튼이 "이번 프레임에" 눌렸는지 (1프레임 엣지)
-    interactPressed: false,    // PHASE 9-1: 상호작용(E / 모바일 버튼) 1프레임 엣지
-    abilityPressed: false,     // PHASE 10-2: 동료 능력(Q / 모바일 버튼) 1프레임 엣지
-    hasTouch: false,
-
-    _joyPointerId: null,
-    _joyOriginX: 0,
-    _joyOriginY: 0,
-    _touchAxis: { x: 0, y: 0 },
-    _attackPointerId: null,
-    _attackRequested: false,
-    _interactPointerId: null,
-    _interactRequested: false,
-    _eWasDown: false,
-    _abilityPointerId: null,
-    _abilityRequested: false,
-    _qWasDown: false,
-
+    axis: { x: 0, y: 0 }, keys: {}, b: {}, touch: false, joy: { id: null, ox: 0, oy: 0, x: 0, y: 0 }, src: {},
+    PAD: PAD, PAD_MAP: PAD_MAP, PAD_GUIDE: PAD_GUIDE, pad: { on: false, index: -1, id: '', prev: [], ax: 0, ay: 0, navT: 0, wants: {} }, rumbles: [],
     init: function () {
-      var self = this;
-
+      var self = this; this.reset();
+      if (!global.addEventListener) return;
       global.addEventListener('keydown', function (e) {
+        var k = e.code;
+        if ((KEYMAP[k] || MOVE[k]) && e.preventDefault) e.preventDefault();
         if (e.repeat) return;
-        self.keys[e.code] = true;
-        if (BLOCKED[e.code]) e.preventDefault();
+        self.keys[k] = true;
+        if (KEYMAP[k]) self.set(KEYMAP[k], true, 'k:' + k);
       });
-
-      global.addEventListener('keyup', function (e) {
-        self.keys[e.code] = false;
-        if (BLOCKED[e.code]) e.preventDefault();
-      });
-
-      // 탭 전환 시 키가 눌린 채로 남지 않게 초기화
+      global.addEventListener('keyup', function (e) { self.keys[e.code] = false; if (KEYMAP[e.code]) self.set(KEYMAP[e.code], false, 'k:' + e.code); });
       global.addEventListener('blur', function () { self.reset(); });
-      document.addEventListener('visibilitychange', function () {
-        if (document.hidden) self.reset();
-      });
-
-      this.hasTouch = ('ontouchstart' in global) || navigator.maxTouchPoints > 0;
-      document.body.classList.toggle('mg-touch', this.hasTouch);
-
-      if (this.hasTouch) this.initTouchControls();
+      global.addEventListener('gamepadconnected', function (e) { self.padConnected(e && e.gamepad); });
+      global.addEventListener('gamepaddisconnected', function () { self.padGone(); });
+      this.initTouch();
     },
-
     reset: function () {
-      this.keys = {};
-      this.axis.x = 0;
-      this.axis.y = 0;
-      this._touchAxis.x = 0;
-      this._touchAxis.y = 0;
-      this._joyPointerId = null;
-      this._attackPointerId = null;
-      this._attackRequested = false;
-      // PHASE 9-1: 상호작용 상태도 남김없이 지운다 (탭 전환/블러로 버튼이 눌린
-      // 채 남아 다음 프레임에 유령 상호작용이 발생하는 것을 막는다)
-      this._interactPointerId = null;
-      this._interactRequested = false;
-      this._eWasDown = false;
-      this.interactPressed = false;
-      // PHASE 10-2: 능력 입력도 같은 이유로 남김없이 지운다
-      this._abilityPointerId = null;
-      this._abilityRequested = false;
-      this._qWasDown = false;
-      this.abilityPressed = false;
-      this.hideJoystick();
-      this.setAttackPressedVisual(false);
-      this.setInteractPressedVisual(false);
-      this.setAbilityPressedVisual(false);
+      this.keys = {}; this.src = {}; this.axis = { x: 0, y: 0 }; this.joy = { id: null, ox: 0, oy: 0, x: 0, y: 0 };
+      for (var i = 0; i < NAMES.length; i++) this.b[NAMES[i]] = { down: false, pressed: false, released: false, heldT: 0 };
     },
-
-    isDown: function (code) {
-      return !!this.keys[code];
+    /* 같은 버튼을 여러 입력원(키 여러 개 · 터치)이 누를 수 있다 — 모두 떼야 뗀 것 */
+    set: function (name, on, source) {
+      var s = this.src[name] = this.src[name] || {}, b = this.b[name];
+      if (!b) return;
+      if (on) s[source || 'x'] = true; else delete s[source || 'x'];
+      var any = false; for (var k in s) { if (s[k]) any = true; }
+      if (any && !b.down) { b.down = true; b.pressed = true; b.heldT = 0; }
+      else if (!any && b.down) { b.down = false; b.released = true; }
+      if (MG.UI && MG.UI.pressVisual) MG.UI.pressVisual(name, b.down);
     },
-
-    /* -------------------------------------------------------- 터치 컨트롤 */
-    initTouchControls: function () {
-      var self = this;
-      this.el = {
-        zone: document.getElementById('joystick-zone'),
-        base: document.getElementById('joystick-base'),
-        knob: document.getElementById('joystick-knob'),
-        attackBtn: document.getElementById('btn-attack'),
-        interactBtn: document.getElementById('btn-interact'),  // PHASE 9 STEP 1
-        abilityBtn: document.getElementById('btn-ability')      // PHASE 10 STEP 2
-      };
-      if (!this.el.zone || !this.el.attackBtn) return;
-
-      this.el.zone.addEventListener('pointerdown', function (e) {
-        if (self._joyPointerId !== null) return; // 이미 다른 손가락이 조작 중
-        self._joyPointerId = e.pointerId;
-        self._joyOriginX = e.clientX;
-        self._joyOriginY = e.clientY;
-        self.showJoystickAt(e.clientX, e.clientY);
-        self.updateJoystick(e.clientX, e.clientY);
-        if (self.el.zone.setPointerCapture) {
-          try { self.el.zone.setPointerCapture(e.pointerId); } catch (err) {}
-        }
-        e.preventDefault();
-      });
-
-      this.el.zone.addEventListener('pointermove', function (e) {
-        if (e.pointerId !== self._joyPointerId) return;
-        self.updateJoystick(e.clientX, e.clientY);
-        e.preventDefault();
-      });
-
-      var releaseJoystick = function (e) {
-        if (e.pointerId !== self._joyPointerId) return;
-        self._joyPointerId = null;
-        self._touchAxis.x = 0;
-        self._touchAxis.y = 0;
-        self.hideJoystick();
-      };
-      this.el.zone.addEventListener('pointerup', releaseJoystick);
-      this.el.zone.addEventListener('pointercancel', releaseJoystick);
-
-      // 공격 버튼: 시각적 눌림 상태 + 1프레임 엣지 트리거
-      this.el.attackBtn.addEventListener('pointerdown', function (e) {
-        if (self._attackPointerId !== null) return;
-        self._attackPointerId = e.pointerId;
-        self._attackRequested = true;
-        self.setAttackPressedVisual(true);
-        if (self.el.attackBtn.setPointerCapture) {
-          try { self.el.attackBtn.setPointerCapture(e.pointerId); } catch (err) {}
-        }
-        e.preventDefault();
-      });
-
-      var releaseAttack = function (e) {
-        if (e.pointerId !== self._attackPointerId) return;
-        self._attackPointerId = null;
-        self.setAttackPressedVisual(false);
-      };
-      this.el.attackBtn.addEventListener('pointerup', releaseAttack);
-      this.el.attackBtn.addEventListener('pointercancel', releaseAttack);
-
-      /* PHASE 9 STEP 1: 상호작용 버튼. 공격 버튼과 완전히 같은 Pointer Events
-         구조를 쓰고, 키보드 E 와 같은 _interactRequested 플래그를 세운다 —
-         새 터치 아키텍처를 만들지 않는다. 평소에는 hidden 이며
-         MG.UI.showInteract() 가 불릴 때만 화면에 나타난다. */
-      if (this.el.interactBtn) {
-        this.el.interactBtn.addEventListener('pointerdown', function (e) {
-          if (self._interactPointerId !== null) return;
-          self._interactPointerId = e.pointerId;
-          self._interactRequested = true;
-          self.setInteractPressedVisual(true);
-          if (self.el.interactBtn.setPointerCapture) {
-            try { self.el.interactBtn.setPointerCapture(e.pointerId); } catch (err) {}
-          }
-          e.preventDefault();
-        });
-
-        var releaseInteract = function (e) {
-          if (e.pointerId !== self._interactPointerId) return;
-          self._interactPointerId = null;
-          self.setInteractPressedVisual(false);
-        };
-        this.el.interactBtn.addEventListener('pointerup', releaseInteract);
-        this.el.interactBtn.addEventListener('pointercancel', releaseInteract);
-      }
-
-      /* PHASE 10 STEP 2: 동료 능력 버튼. 공격/상호작용 버튼과 완전히 같은
-         Pointer Events 구조이고, 키보드 Q 와 같은 _abilityRequested 를 세운다.
-         평소에는 hidden 이며 MG.UI.showAbility() 가 불릴 때만 나타난다. */
-      if (this.el.abilityBtn) {
-        this.el.abilityBtn.addEventListener('pointerdown', function (e) {
-          if (self._abilityPointerId !== null) return;
-          self._abilityPointerId = e.pointerId;
-          self._abilityRequested = true;
-          self.setAbilityPressedVisual(true);
-          if (self.el.abilityBtn.setPointerCapture) {
-            try { self.el.abilityBtn.setPointerCapture(e.pointerId); } catch (err) {}
-          }
-          e.preventDefault();
-        });
-
-        var releaseAbility = function (e) {
-          if (e.pointerId !== self._abilityPointerId) return;
-          self._abilityPointerId = null;
-          self.setAbilityPressedVisual(false);
-        };
-        this.el.abilityBtn.addEventListener('pointerup', releaseAbility);
-        this.el.abilityBtn.addEventListener('pointercancel', releaseAbility);
-      }
-    },
-
-    showJoystickAt: function (x, y) {
-      if (!this.el || !this.el.base) return;
-      this.el.base.style.left = x + 'px';
-      this.el.base.style.top = y + 'px';
-      this.el.base.hidden = false;
-    },
-
-    hideJoystick: function () {
-      if (!this.el || !this.el.base || !this.el.knob) return;
-      this.el.base.hidden = true;
-      this.el.knob.style.transform = 'translate(0px, 0px)';
-    },
-
-    updateJoystick: function (x, y) {
-      var dx = x - this._joyOriginX;
-      var dy = y - this._joyOriginY;
-      var dist = Math.sqrt(dx * dx + dy * dy);
-
-      if (dist < JOY_DEADZONE) {
-        this._touchAxis.x = 0;
-        this._touchAxis.y = 0;
-        if (this.el && this.el.knob) this.el.knob.style.transform = 'translate(0px, 0px)';
-        return;
-      }
-
-      var clamped = Math.min(dist, JOY_RADIUS);
-      var nx = dx / dist;
-      var ny = dy / dist;
-      var kx = nx * clamped;
-      var ky = ny * clamped;
-
-      this._touchAxis.x = kx / JOY_RADIUS;
-      this._touchAxis.y = ky / JOY_RADIUS;
-
-      if (this.el && this.el.knob) {
-        this.el.knob.style.transform = 'translate(' + kx.toFixed(1) + 'px, ' + ky.toFixed(1) + 'px)';
-      }
-    },
-
-    setAttackPressedVisual: function (pressed) {
-      if (this.el && this.el.attackBtn) {
-        this.el.attackBtn.classList.toggle('is-pressed', pressed);
-      }
-    },
-
-    setInteractPressedVisual: function (pressed) {
-      if (this.el && this.el.interactBtn) {
-        this.el.interactBtn.classList.toggle('is-pressed', pressed);
-      }
-    },
-
-    setAbilityPressedVisual: function (pressed) {
-      if (this.el && this.el.abilityBtn) {
-        this.el.abilityBtn.classList.toggle('is-pressed', pressed);
-      }
-    },
-
-    /* 매 프레임 이동 입력을 갱신 (player.js 가 axis 를, 이후 combat.js 가
-       attackPressed 를 사용한다) */
-    update: function () {
+    /* 테스트/스크립트: 누르기 · 떼기 */
+    hold: function (name, on) { this.set(name, on, 'script'); },
+    update: function (dt) {
+      this.pollPad(dt);
       var kx = 0, ky = 0;
-      if (this.isDown('KeyA') || this.isDown('ArrowLeft'))  kx -= 1;
-      if (this.isDown('KeyD') || this.isDown('ArrowRight')) kx += 1;
-      if (this.isDown('KeyW') || this.isDown('ArrowUp'))    ky -= 1;
-      if (this.isDown('KeyS') || this.isDown('ArrowDown'))  ky += 1;
+      for (var k in MOVE) if (this.keys[k]) { kx += MOVE[k][0]; ky += MOVE[k][1]; }
+      if (this.joy.id !== null) { kx = this.joy.x; ky = this.joy.y; }
+      if (this.pad.on && (this.pad.ax || this.pad.ay) && !this.padMenu()) { kx = this.pad.ax; ky = this.pad.ay; }   // v86 패드 스틱 · 십자키
+      if (this.script) { kx = this.script.x; ky = this.script.y; }
+      var l = Math.sqrt(kx * kx + ky * ky);
+      if (l > 1) { kx /= l; ky /= l; }
+      this.axis.x = kx; this.axis.y = ky;
+      for (var i = 0; i < NAMES.length; i++) if (this.b[NAMES[i]].down) this.b[NAMES[i]].heldT += dt;
+    },
+    /* ---------------------------------------------------------------- v86 게임패드 */
+    pads: function () { var n = global.navigator; try { return n && n.getGamepads ? n.getGamepads() || [] : []; } catch (e) { return []; } },
+    padConnected: function (gp) {
+      var was = this.pad.on; this.pad.on = true; if (gp) { this.pad.index = gp.index; this.pad.id = String(gp.id || 'gamepad'); }
+      var d = global.document; if (d && d.body && d.body.classList) d.body.classList.add('mg-pad');
+      if (!was && MG.UI && MG.UI.ribbon && MG.Game && MG.Game.state === 'PLAY') MG.UI.ribbon('🎮 패드 연결 — X 공격 · Y 회피 · B 마법 · LB 물약', 3200);
+      if (!was) MG.emit('padOn', this.pad.id);
+    },
+    padGone: function () { if (!this.pad.on) return; this.pad.on = false; this.pad.index = -1; var d = global.document; if (d && d.body && d.body.classList) d.body.classList.remove('mg-pad'); for (var k in this.src) { for (var s in this.src[k]) if (s.indexOf('g:') === 0) this.set(k, false, s); } this.pad.ax = 0; this.pad.ay = 0; this.pad.prev = []; this.pad.wants = {}; MG.emit('padOff'); },
+    /* 창(타이틀 · 📜 · 전송 · 각인 · 대화) · 대장간 · 컷씬이 열려 있으면 스틱 · 십자키는 이동 대신 항목 고르기 */
+    padMenu: function () { var G = MG.Game, UI = MG.UI; if (!G) return null; if (G.state === 'TITLE') return 'title'; if (MG.Story && MG.Story.active) return 'cine'; if (MG.Forge && MG.Forge.open) return MG.Forge.craft ? null : 'forge'; if (UI && UI.modalOpen && UI.modalOpen()) return 'modal'; if (MG.NPC && MG.NPC.open) return 'talk'; return null; },
+    pollPad: function (dt) {
+      var list = this.pads(), gp = null, i;
+      for (i = 0; i < list.length; i++) if (list[i] && list[i].connected !== false && list[i].buttons && list[i].buttons.length) { gp = list[i]; break; }
+      if (!gp) { if (this.pad.on) this.padGone(); return; }
+      if (!this.pad.on || this.pad.index !== gp.index) this.padConnected(gp);
+      var prev = this.pad.prev, now = [];
+      for (i = 0; i < 16; i++) now[i] = !!(gp.buttons[i] && (gp.buttons[i].pressed || gp.buttons[i].value > 0.5));
+      var hit = function (k) { return now[PAD[k]] && !prev[PAD[k]]; }, menu = this.padMenu();
+      // 이동: 왼쪽 스틱(데드존 0.22) + 십자키
+      var ax = gp.axes && gp.axes.length > 1 ? +gp.axes[0] || 0 : 0, ay = gp.axes && gp.axes.length > 1 ? +gp.axes[1] || 0 : 0;
+      if (Math.sqrt(ax * ax + ay * ay) < 0.22) { ax = 0; ay = 0; }
+      if (now[PAD.LEFT]) ax = -1; if (now[PAD.RIGHT]) ax = 1; if (now[PAD.UP]) ay = -1; if (now[PAD.DOWN]) ay = 1;
+      this.pad.ax = ax; this.pad.ay = ay;
+      // 언제나 같은 버튼(창이 열려 있으면 START 만 — 📜 닫기)
+      for (i = 0; i < PAD_MAP.length; i++) { var pm = PAD_MAP[i], on = now[PAD[pm[0]]] && (!menu || (pm[1] === 'menu' && menu !== 'cine' && menu !== 'title') || (pm[1] === 'act' && menu === 'forge')); this.padSet(pm[1], !!on, 'g:' + pm[0]); }
+      // B = 마법(필드) · 닫기(창 · 컷씬 스킵) — A = 상호작용(대상이 있을 때) · 메뉴 선택 — RB / RT = 화톳불 전송
+      this.padSet('magic', !menu && now[PAD.B], 'g:B');
+      this.padSet('esc', !!menu && menu !== 'title' && now[PAD.B], 'g:B2');
+      var G = MG.Game, near = !menu && G && !!G.ctx;
+      this.padSet('act', !!(near && now[PAD.A]) || !!(!menu && MG.Forge && MG.Forge.open && now[PAD.A]), 'g:A');
+      if (menu && menu !== 'cine') { this.pad.navT -= dt; var dir = ay > 0.5 ? 1 : ay < -0.5 ? -1 : (ax > 0.5 ? 1 : ax < -0.5 ? -1 : 0); if (!dir) this.pad.navT = 0; else if (this.pad.navT <= 0) { this.pad.navT = 0.22; if (MG.UI && MG.UI.padNav) MG.UI.padNav(dir, menu); } if (hit('A') && MG.UI && MG.UI.padPick) MG.UI.padPick(menu); }
+      if (menu === 'cine' && (hit('A') || hit('START') || hit('B'))) { if (MG.Story) MG.Story.skip(); }
+      if (!menu && (hit('RB') || hit('RT')) && G && G.padWarp) G.padWarp();
+      this.pad.prev = now;
+    },
+    /* 패드 버튼은 「바뀐 순간」에만 누름/뗌을 보낸다 — 창이 열리며 입력이 초기화돼도(openModal · 컷씬) 쥐고 있던 버튼이 다시 눌리지 않는다 */
+    padSet: function (name, want, source) { var w = this.pad.wants; want = !!want; if (want && !w[source]) this.set(name, true, source); else if (!want && w[source]) this.set(name, false, source); w[source] = want; },
+    /* 지금 ⚔️ 를 누르는 것이 패드 X 뿐인가(X = 언제나 공격 · 상호작용은 A) */
+    padAttackOnly: function () { var s = this.src.act || {}, any = false; for (var k in s) { if (!s[k]) continue; if (k !== 'g:X') return false; any = true; } return any; },
+    /* ---------------------------------------------------------------- v86 햅틱 진동: ms = 길이 · mag = 세기(0~1) · why = 기록용 */
+    rumble: function (ms, mag, why) {
+      ms = Math.max(0, Math.min(400, Math.round(+ms || 0))); mag = Math.max(0, Math.min(1, +mag || 0.6)); if (!ms) return false;
+      this.rumbles.push({ ms: ms, mag: mag, why: why || '' }); if (this.rumbles.length > 40) this.rumbles.shift();
+      var n = global.navigator, ok = false;
+      try { if (n && typeof n.vibrate === 'function') ok = n.vibrate(ms) !== false; } catch (e) { /* 지원 안 함 */ }
+      try { var gp = this.pad.on ? this.pads()[this.pad.index] : null, va = gp && gp.vibrationActuator; if (va && va.playEffect) { va.playEffect(va.type || 'dual-rumble', { duration: ms, strongMagnitude: mag, weakMagnitude: mag * 0.6 }); ok = true; } } catch (e2) { /* 지원 안 함 */ }
+      return ok;
+    },
+    /* 프레임 끝: 이번 프레임의 눌림/뗌 표시를 지운다 */
+    endFrame: function () { for (var i = 0; i < NAMES.length; i++) { this.b[NAMES[i]].pressed = false; this.b[NAMES[i]].released = false; } },
 
-      // 대각선 이동이 빨라지지 않도록 정규화
-      if (kx !== 0 && ky !== 0) {
-        var inv = Math.SQRT1_2;
-        kx *= inv;
-        ky *= inv;
+    initTouch: function () {
+      var self = this, doc = global.document; if (!doc || !doc.getElementById) return;
+      var zone = doc.getElementById('joy-zone'), base = doc.getElementById('joy-base'), knob = doc.getElementById('joy-knob');
+      var R = 42;
+      var place = function () { if (!base || !base.style) return; base.style.left = self.joy.bx + 'px'; base.style.top = self.joy.by + 'px'; if (knob) knob.style.transform = 'translate(' + (self.joy.x * R) + 'px, ' + (self.joy.y * R) + 'px)'; };
+      var local = function (e) { var r = zone.getBoundingClientRect(), s = (MG.UI && MG.UI.sx) || 1; return { x: (e.clientX - r.left) / s, y: (e.clientY - r.top) / s }; };
+      if (zone) {
+        zone.addEventListener('pointerdown', function (e) {
+          if (self.joy.id !== null) return;
+          self.touch = true; if (e.preventDefault) e.preventDefault();
+          var p = local(e); self.joy.id = e.pointerId; self.joy.ox = e.clientX; self.joy.oy = e.clientY; self.joy.bx = p.x; self.joy.by = p.y; self.joy.x = 0; self.joy.y = 0;
+          try { zone.setPointerCapture(e.pointerId); } catch (er) { /* 무시 */ }
+          if (base && base.classList) base.classList.add('is-on'); place();
+        });
+        zone.addEventListener('pointermove', function (e) {
+          if (e.pointerId !== self.joy.id) return;
+          var s = (MG.UI && MG.UI.sx) || 1, dx = (e.clientX - self.joy.ox) / s, dy = (e.clientY - self.joy.oy) / s, l = Math.sqrt(dx * dx + dy * dy);
+          var m = Math.min(1, l / R); if (m < 0.18) { self.joy.x = 0; self.joy.y = 0; } else { self.joy.x = dx / l * m; self.joy.y = dy / l * m; }
+          place();
+        });
+        var up = function (e) { if (e.pointerId !== self.joy.id) return; self.joy.id = null; self.joy.x = 0; self.joy.y = 0; if (base && base.classList) base.classList.remove('is-on'); };
+        zone.addEventListener('pointerup', up); zone.addEventListener('pointercancel', up);
       }
-
-      var joyActive = this._joyPointerId !== null;
-      this.axis.x = joyActive ? this._touchAxis.x : kx;
-      this.axis.y = joyActive ? this._touchAxis.y : ky;
-
-      var spaceEdge = this.isDown('Space') && !this._spaceWasDown;
-      this._spaceWasDown = this.isDown('Space');
-
-      this.attackPressed = this._attackRequested || spaceEdge;
-      this._attackRequested = false;
-
-      /* PHASE 9 STEP 1: 상호작용도 공격과 똑같은 1프레임 엣지다. keydown 핸들러가
-         이미 e.repeat 를 걸러내지만, 키를 누르고 있는 동안 매 프레임 발화하지
-         않도록 여기서도 눌림 전환만 잡는다. 소비 여부와 무관하게 매 프레임 새로
-         계산되므로 플래그가 다음 프레임까지 남지 않는다. */
-      var eEdge = this.isDown('KeyE') && !this._eWasDown;
-      this._eWasDown = this.isDown('KeyE');
-
-      this.interactPressed = this._interactRequested || eEdge;
-      this._interactRequested = false;
-
-      // PHASE 10 STEP 2: 능력도 완전히 같은 1프레임 엣지다.
-      var qEdge = this.isDown('KeyQ') && !this._qWasDown;
-      this._qWasDown = this.isDown('KeyQ');
-
-      this.abilityPressed = this._abilityRequested || qEdge;
-      this._abilityRequested = false;
+      var bind = function (id, name) {
+        var el = doc.getElementById(id); if (!el) return;
+        el.addEventListener('pointerdown', function (e) { self.touch = true; if (e.preventDefault) e.preventDefault(); try { el.setPointerCapture(e.pointerId); } catch (er) { /* 무시 */ } self.set(name, true, 'p:' + e.pointerId); });
+        var off = function (e) { self.set(name, false, 'p:' + e.pointerId); };
+        el.addEventListener('pointerup', off); el.addEventListener('pointercancel', off);
+        el.addEventListener('contextmenu', function (e) { if (e.preventDefault) e.preventDefault(); });
+      };
+      bind('btn-act', 'act'); bind('btn-roll', 'roll'); bind('btn-magic', 'magic'); bind('btn-estus', 'estus');
     }
   };
-
   MG.Input = Input;
 })(window);

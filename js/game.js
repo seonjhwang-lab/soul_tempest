@@ -1,1279 +1,469 @@
 /* ==========================================================================
-   game.js — 게임 루프 / 전체 게임 상태 / 캔버스 반응형 스케일
-   v0.1.1 PORTRAIT CONVERSION:
-     - 내부 해상도를 세로형 360x640 (9:16) 로 전환 (기존 480x270 16:9 폐기)
-     - resize() 의 비율-맞춤 로직 자체는 해상도에 무관하게 동작하므로
-       INTERNAL_W/H 상수만 바꾸면 카메라·렌더 파이프라인이 함께 따라온다
-     - 상태 머신(BOOT / TITLE / PLAY)의 뼈대
-     - 델타타임 기반 메인 루프
+   game.js — 상태(타이틀/플레이) · 고정 루프 · 맵 전환(필드 ↔ 지하 던전 전실 ↔ 보스 둥지 · 심연의 투기장) · 카메라 · y 정렬 그리기 ·
+             스마트 원버튼 상호작용 · 화톳불 휴식/전송 · 사망/부활 · 지역 진입 알림 · 비석/성소/상자(황금 씨앗) 보상 · 날씨(눈보라/재) · 저장 연동
+   v83: 심연의 지하 미궁 · 영혼 수렵 파트너 · 붉은 폭풍의 밤 · 유물 · HD-2D 빛 패스와 암흑 방
+   v82: [💬 대화](방랑 NPC) · [🔥 가호 받기](사신수의 성소) · 「🔓 고대 봉인 해제!」(전실 퍼즐 · 수문장) — 모두 같은 메인 버튼
    ========================================================================== */
 (function (global) {
   'use strict';
+  var MG = global.MG, U = MG.U, D = MG.Data;
 
-  var MG = global.MG = global.MG || {};
-
-  // v0.1.1: 모바일 세로 플레이가 기본 화면이다 (9:16).
-  // 데스크톱에서는 이 세로 무대가 화면 중앙에 최대 크기로 축소 표시된다 (style.css 참고).
-  var INTERNAL_W = 360;
-  var INTERNAL_H = 640;
-  var MAX_DT = 0.05;      // 탭 전환 후 큰 점프 방지 (초)
-
-  // 개발용 디버그 오버레이. true 로 바꾸면 화면 크기/카메라/입력 상태를 표시한다.
-  var DEBUG_MOBILE_LAYOUT = false;
-
-  // PHASE 6.1: 타격이 성공했을 때 아주 짧게 게임 진행을 슬로우모션으로 늦춰
-  // "탁 걸리는" 손맛을 준다. 완전히 멈추면(dt=0) 애니메이션/타이머가 이상하게
-  // 얼어붙을 수 있어 0에 아주 가깝지만 0은 아닌 배율을 쓴다 — 그래서 이동/공격
-  // 쿨다운 등 기존 타이밍 코드를 손대지 않고도 "거의 정지"처럼 보인다.
-  var HITSTOP_SCALE = 0.06;
-
-  /* PHASE 8.1: 정화(THE CLEANSING) 연출 상수.
-     파동은 화면(360x640)의 대각 절반(~367)보다 넉넉히 크게 퍼져 맵 위 남은
-     모슬링까지 닿는다. 게임을 멈추지 않고, 컷신도 없다 — 그냥 짧고 강한
-     한 번의 파동이다. */
-  var CLEANSE_DURATION = 1.0;      // 초 — 파동이 다 퍼지는 데 걸리는 시간
-  var CLEANSE_MAX_RADIUS = 560;    // 월드 픽셀 — 가장 먼 스폰 지점까지 덮는다
-  var CLEANSE_FLASH = 0.18;        // 초 — 활성화 순간의 짧은 화면 섬광
-  var ATMOSPHERE_FADE = 1.4;       // 초 — 숲이 밝아지는 데 걸리는 시간
-
-  /* PHASE 9.1: 정화가 끝난 뒤, 플레이어가 스스로 처음 출발했던 공터로 돌아오면
-     "다시 모험하기"를 조용히 권한다. 강제하지 않는다 — 정화된 숲을 마음껏
-     돌아다니다가 돌아왔을 때만 나타난다.
-     경계에서 문구가 깜빡이지 않도록 들어올 때와 나갈 때 반경을 다르게 둔다
-     (모슬링 감지의 DETECT_RADIUS/LEAVE_RADIUS 와 같은 히스테리시스 방식). */
-  var RESTART_ENTER_RADIUS = 70;   // 이 안으로 들어오면 문구가 뜬다
-  var RESTART_LEAVE_RADIUS = 92;   // 이 밖으로 나가야 사라진다
-
-  /* PHASE 10 STEP 3: 보물 상자.
-     사거리는 모스키 상호작용(28/38)과 같은 값을 쓴다 — 같은 버튼, 같은 입력,
-     같은 체감이어야 하기 때문이다. 경계에서 깜빡이지 않도록 히스테리시스도 동일. */
-  var TREASURE_ENTER = 28;
-  var TREASURE_LEAVE = 38;
-  var TREASURE_OPEN_TIME = 0.55;   // 초 — 뚜껑이 열리는 연출 (게임은 멈추지 않는다)
-
-  /* PHASE 11 STEP 2: 완료 화면을 띄우기까지의 짧은 뜸.
-     상자가 열린 직후에는 뚜껑 연출 + 파티클 + "달빛 조각을 획득했다!" 토스트가
-     한꺼번에 일어난다. 그 위로 곧바로 전체 화면을 덮으면 방금 얻은 보상을
-     제대로 보지도 못하고 가려진다 — 잠깐 여운을 두고 올린다. */
-  var COMPLETE_DELAY = 1.6;        // 초
-
-  /* LAZY DINER STEP 1: 문 발판을 밟아 구역을 전환한 직후, 같은 발판 위에
-     그대로 서 있는 상태로 곧장 되돌아가지 않도록 짧은 쿨다운을 둔다.
-     (스폰 위치 자체도 문 발판과 겹치지 않게 잡아 두 겹으로 막는다.) */
-  var ZONE_TRANSITION_COOLDOWN = 0.5;   // 초
-
-  /* LAZY DINER STEP 3: 화로 상호작용 사거리. 보물상자(28/38)와 같은 규모의
-     히스테리시스 관용구를 그대로 쓴다 — 방이 작아 살짝 더 좁혀 잡았다. */
-  var STOVE_INTERACT_ENTER = 26;
-  var STOVE_INTERACT_LEAVE = 36;
-
-  /* LAZY DINER STEP 11: 하루를 마치는 장면의 글. 문 앞에서 두 줄(화자 이름 없음)이
-     나오고, 끝나면 다음 날 아침이 바깥에서 시작된다. 아침 토스트는 손님의 chapter
-     ("다음에 낼 밤")로 고른다 — 1 이면 이제 둘째 날, 2 면 셋째 날이다. */
-  var CLOSING_LINES = ['(불을 끄고 문을 잠근다)', '…내일도 문은 열어야지.'];
-
-  /* LAZY DINER STEP 15: 첫 1분을 설명 없이 알려 주는 한 번짜리 혼잣말과 화로 아이콘.
-     튜토리얼이 아니다 — 기존 토스트 슬롯을 쓰고, 첫날 안에 모두 소진된다. */
-  var HINT_HOLD_MS = 3200;
-  var HINT_START = '…또 재료가 떨어졌네. 뭐라도 잡아 와야 끓이지.';
-  var HINT_MEAT = '…고기다. 가게 가서 라면이나 끓여야지.';
-  var HINT_ENTER_MEAT = '…화로는 멀쩡하네. 어디 한번 끓여 볼까.';
-  var HINT_ENTER_EMPTY = '…화로는 멀쩡하다. 넣을 게 없을 뿐.';
-  var HINT_RAMEN = '…모양은 이래도 라면은 라면이다. 손님이 먹어 주려나.';
-  var ICON_STOVE = '🔥';
-  var MORNING_TOASTS = { 1: '둘째 날 아침.', 2: '셋째 날 아침.' };
-
-  var Game = {
-    VERSION: '0.1.11',
-    WIDTH: INTERNAL_W,
-    HEIGHT: INTERNAL_H,
-    DEBUG_MOBILE_LAYOUT: DEBUG_MOBILE_LAYOUT,
-
-    /* LAZY DINER STEP 7: 옛 Moonlit 의 달의 돌(정화) 활성화를 켜고 끄는 스위치.
-       꺼져 있는 것이 기본이다 — 정화는 모슬링을 고기 없이 죽이고 다시 나타나지
-       못하게 해서 Lazy Diner 루프를 막을 수 있기 때문이다. 이 값이 false 면
-       updateMoonstone() 이 맨 앞에서 돌아가므로 달의 돌은 그려지고 길을 막기만
-       할 뿐 아무 일도 일으키지 않는다. 옛 코드는 그대로 남아 있어, 콘솔에서
-       MG.Game.LEGACY_MOONSTONE_ENABLED = true 로 켜면 예전처럼 동작한다. */
-    LEGACY_MOONSTONE_ENABLED: false,
-
-    /* LAZY DINER STEP 13: 옛 Moonlit 의 동료 모스키를 켜고 끄는 스위치. 꺼져 있는 것이
-       기본이다 — 이 프로토타입은 생존자 한 명과 손님 한 명의 이야기라, 덩굴에 묶인
-       생물이 보이거나 따라와 다이너까지 들어오면 안 된다. false 면 update() 가
-       Companion.update 를, render() 가 Companion.collect 를 건너뛰므로 모스키는
-       그려지지도, 영입되지도, 따라오지도 않는다(덩굴 다리/🌿 버튼도 함께 닿지 않는다).
-       companion.js 와 init() 호출은 그대로다 — 콘솔에서
-       MG.Game.LEGACY_MOSKI_ENABLED = true 로 켜면 예전처럼 동작한다. */
-    LEGACY_MOSKI_ENABLED: false,
-
-    canvas: null,
-    ctx: null,
-    stage: null,
-
-    state: 'BOOT',        // BOOT | TITLE | PLAY
-    running: false,
-    paused: false,        // 세로 방향 경고 등으로 인한 일시정지
-    time: 0,              // 누적 경과 시간(초)
-    frame: 0,
-    hitStopT: 0,           // PHASE 6.1: 남은 히트스탑 시간(실시간 초)
-
-    /* PHASE 8: 첫 게임 목표(달의 돌) 진행 플래그. 퀘스트 프레임워크가 아니라
-       불린 하나다. 이번 세션 동안만 유지되며(로컬스토리지/서버 저장 없음),
-       사망/부활로는 절대 되돌아가지 않는다 — Player.respawn() 은 모슬링만
-       MG.Enemy.init() 으로 되돌리고 이 값은 건드리지 않기 때문이다. */
-    moonstoneFound: false,
-    /* PHASE 10 STEP 1: 덩굴 다리의 상태 자리만 만들어 둔다.
-       이 단계에서는 누구도 true 로 바꾸지 않는다 — 능력(STEP 2)이 생기면
-       그때 이 플래그를 켜고, 그때 비로소 강의 충돌을 걷어내게 된다.
-       지금은 항상 false 이며, 따라서 강은 계속 막혀 있다. */
-    bridgeActivated: false,
-
-    /* PHASE 11 STEP 1: Prototype 0.1 을 끝까지 마쳤는가.
-
-       STEP 5 부터 이 빗장을 채우는 조건은 Lazy Diner 의 것이다:
-         clueHeard && _farewellDone      — 단서를 듣고 작별까지 마침
-       (예전 Moonlit 조건 — 모스키 영입 + 덩굴 다리 + 보물 상자 — 은 더 이상
-        이 빗장을 채우지 않는다. 그 게임플레이 코드는 그대로 남아 있다.)
-       한 번 켜지면 다시 꺼지지 않는다. 사망/부활로는 되돌아가지 않는다
-       (Player.respawn() 은 모슬링만 되돌리고 Game 의 진행 플래그는 건드리지
-       않는다 — moonstoneFound / cleansed / bridgeActivated 와 같은 성질이다).
-       세션 재시작(restartSession)에서만 false 로 돌아간다.
-
-       이 단계는 "감지"까지다 — 완료 화면도, 문구도, 버튼도 만들지 않는다. */
-    gameComplete: false,
-
-    // PHASE 11 STEP 2: 완료 화면이 이미 올라갔는가 + 올리기까지 남은 뜸.
-    // 완료 "판정"은 gameComplete 하나가 계속 책임지고, 이 둘은 화면 표시 타이밍만 다룬다.
-    _completeShown: false,
-    _completeDelayT: COMPLETE_DELAY,
-
-    // PHASE 10 STEP 3: 상자 상호작용 버튼 상태 캐시 (DOM 을 매 프레임 건드리지
-    // 않기 위한 것 — companion.js 의 _promptShown 과 같은 방식)
-    _treasureInRange: false,
-    _treasurePromptShown: false,
-
-    // LAZY DINER STEP 1: 구역 전환 직후 남은 쿨다운(초). 0보다 크면 문 발판
-    // 검사 자체를 건너뛴다.
-    _zoneCooldownT: 0,
-
-    /* LAZY DINER STEP 2: 사냥으로 얻는 유일한 자원. moonstoneFound/cleansed 와
-       같은 성질이다 — 이번 세션 동안만 유지되고, 저장 시스템 없이 단순한
-       숫자 하나일 뿐이며, 사망/부활로는 절대 되돌아가지 않는다(Player.
-       respawn() 은 이 값을 건드리지 않는다). 재시작(restartSession)에서만
-       0 으로 돌아간다. */
-    meat: 0,
-
-    /* LAZY DINER STEP 3: 요리 결과물. meat 와 완전히 같은 성질(세션 동안만
-       유지, 사망/부활로 되돌아가지 않음, 재시작에서만 0으로)이다. 지금은
-       "고기라면" 하나뿐이지만, 나중에 다른 요리가 추가돼도 이 값의 자리를
-       옮길 필요가 없도록 이름을 meatRamen 으로 구체적으로 둔다(범용
-       "재료판"을 아직 만들지 않는다). */
-    meatRamen: 0,
-
-    // LAZY DINER STEP 3: 화로 상호작용 버튼 상태 캐시 — _treasureInRange 와
-    // 완전히 같은 방식(DOM 을 매 프레임 건드리지 않기 위한 것).
-    _stoveInRange: false,
-    _stovePromptShown: false,
-
-    /* LAZY DINER STEP 4-1: 첫 손님의 이야기를 끝까지 들었는가 — 불린 하나뿐이다.
-       moonstoneFound/cleansed 와 같은 성질(세션 동안만 유지, 사망/부활로
-       되돌아가지 않음, 재시작에서만 false로). STEP 5 부터 프로토타입 엔딩의
-       첫 번째 조건이다 — 아래 _farewellDone 과 함께 isPrototypeComplete() 를
-       이룬다. */
-    clueHeard: false,
-
-    /* LAZY DINER STEP 5: 프로토타입 엔딩(작별 한 줄)의 진행 상태. 불린 둘뿐이다.
-         _farewellStarted — 단서를 들은 뒤 문 발판을 밟아 작별 대사를 연 순간부터
-                            true. 이후로는 문이 다시 열리지 않고 조작이 잠긴다
-                            (대사 중 + 완료 화면 뜸 + 완료 화면). 재시작에서만 false.
-         _farewellDone    — 작별 대사를 끝까지 넘겼다. 이게 켜져야 엔딩이 확정된다.
-       사망/부활로는 되돌아가지 않고 재시작에서만 false 로 돌아간다. */
-    _farewellStarted: false,
-    _farewellDone: false,
-
-    /* LAZY DINER STEP 15: 첫 1분의 "혼잣말" 네 개를 이미 보여 줬는가. 이 플레이어가 처음
-       설명을 봤다는 기록이라 restartSession 에서 되돌리지 않는다 — 같은 사람이 다시 하면
-       루프를 이미 아는 사람이다. 페이지를 새로 열면 자연히 처음 상태로 돌아간다. */
-    _hintSeen: { start: false, meat: false, enter: false, ramen: false },
-
-    /* LAZY DINER STEP 11: 하루를 마치는 중(닫는 대사가 열린 순간부터 finishDay 까지).
-       그동안 문 발판은 다시 반응하지 않는다 — 플레이어가 문 발판 위에 선 채로 대사가
-       열리기 때문이다. finishDay 에서 false 로 돌아오고, 재시작에서도 false 로 돌아온다. */
-    _closingDay: false,
-
-    /* PHASE 8.1-B: 숲이 정화되었는가. moonstoneFound 와 마찬가지로 이번
-       세션 동안만 유지되는 불린 하나이며, 사망/부활로 절대 되돌아가지
-       않는다(Player.respawn() 은 이 값을 건드리지 않는다). 저장 시스템 없음. */
-    cleansed: false,
-
-    // 정화 파동이 퍼지는 동안에만 존재하는 임시 상태 { t, x, y }
-    cleanse: null,
-
-    // 0 = 정화 전(어둡고 무겁게) → 1 = 정화 후(달빛이 든 것처럼 밝게)
-    atmosphere: 0,
-
-    // PHASE 9.1: "다시 모험하기" 문구가 지금 떠 있는가 (DOM 을 매 프레임
-    // 건드리지 않고 상태가 바뀔 때만 갱신하기 위한 캐시)
-    _restartPromptShown: false,
-
-    _lastTs: 0,
-    _rafId: 0,
-
-    /* ---------------------------------------------------------------- init */
-    init: function () {
-      this.canvas = document.getElementById('game-canvas');
-      if (!this.canvas) {
-        console.error('[MG] game-canvas 를 찾을 수 없습니다.');
-        return false;
-      }
-      this.stage = document.getElementById('stage');
-      this.root = document.getElementById('game-root');
-      this.ctx = this.canvas.getContext('2d', { alpha: false });
-
-      this.canvas.width = INTERNAL_W;
-      this.canvas.height = INTERNAL_H;
-      this.ctx.imageSmoothingEnabled = false;
-
-      // 화면 크기 / 방향 변화 대응
-      var self = this;
-      this._onResize = function () { self.resize(); };
-      global.addEventListener('resize', this._onResize);
-      global.addEventListener('orientationchange', this._onResize);
-      if (global.visualViewport) {
-        global.visualViewport.addEventListener('resize', this._onResize);
-      }
-      // 컨테이너 크기가 늦게 확정되는 환경(임베드 뷰 등)까지 확실히 따라간다
-      if (global.ResizeObserver && this.root) {
-        this._ro = new global.ResizeObserver(this._onResize);
-        this._ro.observe(this.root);
-      }
-
-      // 안전망: 일부 모바일 브라우저는 주소창 접힘/회전 시 resize 이벤트를 누락한다.
-      this._pollId = global.setInterval(function () {
-        var v = self.viewportSize();
-        if (v.w > 0 && v.h > 0 && (v.w !== self._lastVW || v.h !== self._lastVH)) self.resize();
-      }, 500);
-
-      this.resize();
+  var Game = MG.Game = {
+    state: 'TITLE', time: 0, cam: { x: 0, y: 0 }, ctx: null, hint: null, biome: null, deadT: 0, titleT: 0, started: false,
+    init: function (canvas) {
+      this.canvas = canvas || null;
+      if (canvas) { canvas.width = MG.W; canvas.height = MG.H; this.g = canvas.getContext('2d'); }
+      MG.World.init('field'); MG.Enemies.spawnAll(); MG.Bosses.init(); MG.Player.init();
       this.state = 'TITLE';
-      // PHASE 9 폴리시: 타이틀 동안에는 조작 컨트롤을 숨긴다(style.css 의
-      // body:not(.mg-playing) 규칙). 상태와 함께 켜고 끄므로 타이머가 필요 없다.
-      document.body.classList.remove('mg-playing');
-      this.start();
+      var self = this;
+      MG.on('eliteDown', function (m) { self.onElite(m); });
+      MG.on('bossDown', function (bo) { if (bo && bo.id === 'k1' && !bo.def.rush && MG.S && !MG.S.endingSeen) self.endingT = self.ENDING_DELAY; });   // v86 진 엔딩: 기사왕 카인(왕의 무덤) 첫 토벌
+    },
+    /* ---------------------------------------------------------------- 시작 */
+    newGame: function () { MG.Save.newGame(); this.begin(); MG.Save.save(); },
+    /* v86 타이틀의 「새로 시작」: 새 게임 + 도트 시네마틱 오프닝(10초 · 언제든 스킵) */
+    newHunt: function () { this.newGame(); MG.S.introSeen = true; if (MG.Story) MG.Story.play('intro', function (skipped) { var G0 = MG.Game, P0 = MG.Player; G0.biome = MG.World.biomeAt(P0.x, P0.y); G0.mapRibbon = 'field'; if (MG.UI) MG.UI.ribbon('🔥 사냥꾼의 야영지 — 북쪽 [고대 뿌리 신전]의 거목부터 베어라', 2600); void skipped; }); },
+    ENDING_DELAY: 2.8, endingT: 0,
+    /* v86 진 엔딩: 남은 전리품은 모두 챙기고(맵을 옮겨도 잃지 않게) → 새벽 컷씬 → 야영지 위 엔딩 크레딧 */
+    playEnding: function () {
+      var S = MG.S, L = MG.Loot; this.endingT = 0; if (!MG.Story || S.endingSeen) return false;
+      if (L) { L.list.slice().forEach(function (it) { if (it.kind !== 'blood') L.pick(it); }); L.list = L.list.filter(function (it) { return it.kind === 'blood'; }); }
+      S.endingSeen = true; S.endings = (S.endings || 0) + 1; MG.Save.save();
+      MG.Story.play('ending', function () { if (MG.UI) MG.UI.ribbon('🌅 새벽이 밝았다 — 수렵은 계속된다 (재수렵 · 심연의 투기장 보스 러시)', 3000); MG.Save.save(); });
+      return true;
+    },
+    /* v86 패드 RB / RT: 화톳불 곁이면 「🔥 화톳불 전송」 */
+    padWarp: function () {
+      var P = MG.Player, W = MG.World, f = null; (W.bonfires || []).forEach(function (b) { if (b.lit && U.dist(P.x, P.y, b.x, b.y) < 54) f = b; });
+      if (f && MG.UI && MG.UI.openWarp) { MG.UI.openWarp(f.id); return true; }
+      if (MG.UI) MG.UI.ribbon('🔥 화톳불 전송은 불을 붙인 화톳불 곁에서 (RB)', 1600); return false;
+    },
+    continueGame: function () { if (!MG.Save.load()) MG.Save.newGame(); this.begin(); },
+    begin: function () {
+      var S = MG.S, W = MG.World;
+      this.endingT = 0; this.gateLore = false; if (MG.Story && MG.Story.active) { MG.Story.active = null; MG.Story.setUi(false); }   // v86 이전 판의 컷씬 · 엔딩 대기는 넘어오지 않는다
+      W.init('field'); this.applyFlags();
+      MG.Enemies.spawnAll(); MG.Bosses.init(); MG.Shots.reset(); MG.Magic.reset(); MG.Loot.reset(); MG.FX.reset();
+      MG.Player.init();
+      var f = this.fire(S.lastFire) || W.bonfires[0], fresh = f === W.bonfires[0] && !S.crafted && S.gold === 0;
+      MG.Player.place(fresh ? D.WORLD.START[0] : f.x, fresh ? D.WORLD.START[1] : f.y + 26);
+      this.dropBlood();
+      this.state = 'PLAY'; this.started = true; this.biome = null; this.deadT = 0; this.ctx = null; this.hint = null;
+      if (MG.UI && MG.UI.closeModal) MG.UI.closeModal();
+      if (MG.Tempest) MG.Tempest.reset(); if (MG.Companion) MG.Companion.spawn();
+      this.snapCam();
+      if (MG.UI) MG.UI.onBegin();
+    },
+    applyFlags: function () {
+      var S = MG.S, W = MG.World;
+      W.bonfires.forEach(function (b) { b.lit = !!S.lit[b.id]; });
+      W.chests.forEach(function (c) { c.open = !!S.chests[c.id]; c.openT = 9; });
+      W.steles.forEach(function (s) { s.used = !!S.steles[s.id]; });
+      W.barriers.forEach(function (b) { if (S.barriers[b.id] || (b.kind === 'seal' && S.gates[b.id])) b.broken = true; });
+      if (W.abyssGate) W.abyssGate.open = !!S.abyssOpen;
+      if (W.kingGate) W.kingGate.open = this.kingReady();   // v84 왕의 무덤: 5대 괴수 토벌 뒤에
+    },
+    dropBlood: function () { var S = MG.S; if (S.blood && (S.blood.map || 'field') === MG.World.id) MG.Loot.blood(S.blood.x, S.blood.y, S.blood.n); },
+    fire: function (id) { var L = MG.World.bonfires; for (var i = 0; i < L.length; i++) if (L[i].id === id) return L[i]; return null; },
+    safeAt: function (x, y) { var L = MG.World.bonfires; for (var i = 0; i < L.length; i++) if (L[i].lit && U.dist(x, y, L[i].x, L[i].y) < 54) return true; return false; },
+    paused: function () { return (MG.Forge && MG.Forge.open) || (MG.UI && MG.UI.modalOpen && MG.UI.modalOpen()) || !!(MG.Story && MG.Story.active); },
+
+    /* ---------------------------------------------------------------- 맵 전환: 필드 ↔ 던전 전실 ↔ 보스 둥지 · 심연의 투기장 */
+    enterMap: function (id, x, y, quiet) {
+      var P = MG.Player, W = MG.World, wasArena = W.id === 'abyss';
+      if (!D.MAPS[id]) return false;
+      W.init(id); this.applyFlags();
+      MG.Enemies.spawnAll(); MG.Shots.reset(); MG.Magic.reset(); MG.Loot.reset();
+      if (wasArena && id !== 'abyss') { MG.Bosses.arena = null; MG.Bosses.arenaBoss = null; MG.Bosses.arenaDone = false; }
+      if (id === 'abyss') MG.Bosses.startArena();
+      P.toIdle(); P.storm = null; P.place(x, y); P.vx = 0; P.vy = 0;
+      if (MG.NPC) MG.NPC.close();
+      if (MG.Companion) MG.Companion.spawn();   // v83 파트너는 언제나 곁에
+      this.dropBlood();
+      this.snapCam(); this.biome = null; this.ctx = null; this.hint = null;
+      if (MG.FX) { MG.FX.flash('#000000', 0.2); MG.FX.burst(P.x, P.y - 10, 18, ['#4deeea', '#eef6ff'], 60, { up: true, g: -20 }); }
+      if (!quiet && MG.UI) MG.UI.ribbon(W.placeName(P.x, P.y), 2000);
+      this.mapRibbon = W.id;
+      MG.emit('map', id);
+      return true;
+    },
+    /* 던전 입구(필드의 계단) 바로 아래 */
+    stairsSpot: function (did) { var L = D.MAPS.field.stairs; for (var i = 0; i < L.length; i++) if (L[i].id === did) return { x: L[i].x, y: L[i].y + 30 }; var c = D.MAPS.field.bonfires[0]; return { x: c.x, y: c.y + 26 }; },
+    goDown: function (st) { var M = D.MAPS[st.to]; return this.enterMap(st.to, M.arrive.down[0], M.arrive.down[1]); },
+    useExit: function (e) {
+      if (e.to === 'field' && e.at === 'tomb') { var KG = D.MAPS.field.kingGate; return this.enterMap('field', KG.x, KG.y + 30); }   // v84 왕의 무덤에서 귀환
+      if (e.to === 'field') {
+        var sp = e.at === 'abyss' ? { x: D.MAPS.field.abyssGate.x, y: D.MAPS.field.abyssGate.y + 28 } : this.stairsSpot(e.at);
+        if (e.kind === 'altar' && MG.FX) MG.FX.flash('#4deeea', 0.15);
+        return this.enterMap('field', sp.x, sp.y);
+      }
+      var M = D.MAPS[e.to], a = M.arrive[e.at] || M.arrive.in || M.arrive.down;
+      return this.enterMap(e.to, a[0], a[1]);
+    },
+    /* 정예 수문장 처치 → 봉인문이 열린다(영구) */
+    onElite: function (m) { if (m.gate) this.unseal(m.gate, 'elite', m); },
+    /* v82 「🔓 고대 봉인 해제!」: 전실의 봉인 장치를 모두 켜거나 수문장을 쓰러뜨렸다 — 보스 둥지 문 + 전실 가운데 보물상자 */
+    unseal: function (gate, why, m) {
+      var S = MG.S, W = MG.World, FX = MG.FX; if (S.gates[gate]) return false;
+      S.gates[gate] = true; W.openSeal(gate); if (MG.Gimmick) MG.Gimmick.lightAll(gate);
+      var b = W.barrierById(gate), cx = b ? b.x + b.w / 2 : MG.Player.x, cy = b ? b.y + b.h + 12 : MG.Player.y - 30;
+      if (FX) { var P0 = MG.Player; FX.text(P0.x, P0.y - 46, '🔓 고대 봉인 해제!', '#bff6ff', 1.8, 17, { pop: true, rise: 6 }); FX.burst(cx, cy, 30, ['#8ae8f8', '#e4fdff', '#c4a8ff'], 120); FX.flash('#bff6ff', 0.12); FX.shake(3, 0.3); }
+      W.chests.forEach(function (c) { if (c.sealed === gate && !c.open && FX) { FX.burst(c.x, c.y - 8, 26, ['#ffd866', '#c4a8ff', '#fff6c0'], 100, { up: true }); FX.ring(c.x, c.y - 6, 4, 26, 0.5, '#ffd866', 2); FX.text(c.x, c.y - 26, '📦 보물상자가 깨어났다', '#ffd866', 1.4, 11); } });
+      if (MG.SFX) MG.SFX.crash();
+      if (MG.UI) MG.UI.ribbon('🔓 고대 봉인 해제! — 둥지 문 · 보물상자 개방', 2600);
+      MG.emit('unseal', gate, why);
+      if (MG.Save) MG.Save.save();
       return true;
     },
 
-    /* 현재 사용 가능한 화면 크기.
-       모바일 브라우저의 주소창/키보드 변화는 visualViewport 가 더 정확하다. */
-    viewportSize: function () {
-      var w = (this.root && this.root.clientWidth) || global.innerWidth || 0;
-      var h = (this.root && this.root.clientHeight) || global.innerHeight || 0;
-      var vvp = global.visualViewport;
-      if (vvp && vvp.width > 0 && vvp.height > 0) {
-        w = Math.min(w, vvp.width);
-        h = Math.min(h, vvp.height);
+    /* ---------------------------------------------------------------- 한 걸음(테스트도 이걸 부른다) */
+    step: function (dt) {
+      var I = MG.Input, b = I.b;
+      dt = Math.min(0.05, dt);
+      I.update(dt);
+      this.time += dt;
+      if (this.state === 'TITLE') { this.titleT += dt; I.endFrame(); return; }
+      if (MG.Story && MG.Story.active) { MG.Story.update(dt, b); I.endFrame(); return; }   // v86 컷씬(오프닝 · 진 엔딩) — 월드는 멈춘다
+      if (b.menu.pressed && !(MG.Forge && MG.Forge.open) && MG.UI) MG.UI.toggleStatus();
+      if (MG.Forge && MG.Forge.open) {
+        if (b.esc.pressed) MG.Forge.close();
+        if (b.act.pressed) { if (MG.Forge.craft) MG.Forge.key(true); else MG.Forge.startMake(); }
+        if (b.act.released) MG.Forge.key(false);
+        MG.Forge.update(dt);
+      } else if (MG.UI && MG.UI.modalOpen && MG.UI.modalOpen()) {
+        if (b.esc.pressed) MG.UI.closeModal();
+      } else this.updateWorld(dt);
+      MG.FX.update(dt, dt * MG.FX.timeScale());
+      I.endFrame();
+      if (MG.UI) MG.UI.syncHud();
+    },
+    hasFlags: function () { var S = MG.S, W = MG.Combat.weapon().def; return { fire: S.spells.indexOf('fire') >= 0, frost: S.spells.indexOf('frost') >= 0, fireWeapon: W.elem === 'fire' }; },
+    updateWorld: function (dt) {
+      var P = MG.Player, I = MG.Input, gdt = dt * MG.FX.timeScale(), W = MG.World;
+      if (I.b.cycle.pressed) this.cycleSpell();
+      // 스마트 상호작용: 멈춰 서 있을 때(또는 걷는 중) 가장 가까운 대상 — 머리 위 말풍선 + 메인 버튼 아이콘
+      this.ctx = P.alive() && P.state === 'idle' ? W.interactAt(P.x, P.y) : null;
+      this.hint = !this.ctx && P.alive() ? W.hintAt(P.x, P.y, this.hasFlags()) : null;
+      P.update(gdt, dt);   // 워치독은 실제 시간으로
+      if (MG.NPC) MG.NPC.update(gdt);   // v82: 대화 바 — 걸어서 멀어지면 저절로 닫힌다
+      if (MG.Companion) MG.Companion.update(gdt); if (MG.Tempest) MG.Tempest.update(gdt); if (MG.Forge && MG.Forge.discover) MG.Forge.discover();   // v83 · v84 무기 파생 해금 감시
+      MG.Enemies.update(gdt); MG.Bosses.update(gdt); MG.Shots.update(gdt); MG.Magic.update(gdt); MG.Loot.update(gdt); W.update(gdt);
+      // 지역 진입(젤다식 지역 이름) — 필드에서만 바이옴이 바뀐다
+      if (W.isField()) {
+        var bio = W.biomeAt(P.x, P.y);
+        if (bio !== this.biome) { if (MG.UI && (this.biome !== null || this.mapRibbon !== 'field')) MG.UI.ribbon(W.placeName(P.x, P.y), 2000); this.biome = bio; this.mapRibbon = 'field'; }
       }
-      return { w: w, h: h };
+      // 부서진 장벽 기록
+      W.barriers.forEach(function (b) { if (b.broken && b.kind !== 'seal' && !MG.S.barriers[b.id]) { MG.S.barriers[b.id] = true; if (MG.Save) MG.Save.save(); } });
+      // v86 왕의 무덤 봉인 서사: 닫힌 문 앞에 서면 「다섯 괴수의 혼이 사슬을 붙들고 있다」 한 줄(가까이 올 때마다 한 번)
+      var KG = W.kingGate; if (KG && !KG.open) { var kd = U.dist(P.x, P.y, KG.x, KG.y); if (kd < 60 && !this.gateLore) { this.gateLore = true; var nd = this.bossesDown(); if (MG.UI) MG.UI.ribbon('⛓ 다섯 괴수의 혼이 왕의 무덤 봉인을 붙들고 있다 — 끊어진 사슬 ' + nd + '/5', 2600); } else if (kd > 140) this.gateLore = false; }
+      if (this.endingT > 0) { this.endingT -= dt; if (this.endingT <= 0) this.playEnding(); }   // v86 진 엔딩(카인 토벌 2.8초 뒤 — 전리품 분수가 끝난 다음)
+      this.updateCam(dt);
     },
-
-    /* -------------------------------------------------------------- resize
-       내부 해상도 비율(9:16)을 유지하면서 뷰포트 안에 최대 크기로 맞춘다.
-       세로로 긴 화면(휴대폰)에서는 거의 꽉 차고, 가로로 넓은 화면(데스크톱)에서는
-       세로 무대가 가운데 놓이고 좌우에 여백(배경색)이 남는다. 비율 계산 자체는
-       INTERNAL_W/H 값에 무관하므로 해상도를 바꿔도 이 로직은 그대로 쓸 수 있다. */
-    resize: function () {
-      if (!this.stage) return;
-
-      var v = this.viewportSize();
-      var vw = v.w, vh = v.h;
-
-      // 레이아웃이 아직 확정되지 않았으면(크기 0) 다음 프레임에 다시 시도
-      if (vw <= 0 || vh <= 0) {
-        var self0 = this;
-        global.requestAnimationFrame(function () { self0.resize(); });
-        return;
-      }
-
-      var ratio = INTERNAL_W / INTERNAL_H;
-      var w = vw;
-      var h = Math.round(w / ratio);
-      if (h > vh) {
-        h = vh;
-        w = Math.round(h * ratio);
-      }
-
-      this.stage.style.width = w + 'px';
-      this.stage.style.height = h + 'px';
-      this._lastVW = vw;
-      this._lastVH = vh;
-
-      this.scale = w / INTERNAL_W;   // 화면 픽셀 : 내부 픽셀 비율 (터치 좌표 변환용)
-
-      if (MG.UI && MG.UI.onResize) MG.UI.onResize(w, h);
-    },
-
-    /* --------------------------------------------------------------- 루프 */
-    start: function () {
-      if (this.running) return;
-      this.running = true;
-      this._lastTs = 0;
-      var self = this;
-      this._step = function (ts) {
-        self._rafId = global.requestAnimationFrame(self._step);
-        if (!self._lastTs) self._lastTs = ts;
-        var dt = (ts - self._lastTs) / 1000;
-        self._lastTs = ts;
-        if (dt > MAX_DT) dt = MAX_DT;
-
-        if (!self.paused) {
-          self.time += dt;
-          self.frame++;
-
-          // 히트스탑: 남은 시간은 "실시간"으로 줄어들지만(다음 프레임엔 반드시
-          // 풀린다), 이번 프레임에 게임플레이로 넘기는 dt 는 크게 축소한다.
-          // 입력 이벤트(pointerdown 등)는 루프와 무관하게 계속 들어오므로
-          // 터치/키보드 반응성에는 영향이 없다.
-          var gameplayDt = dt;
-          if (self.hitStopT > 0) {
-            self.hitStopT -= dt;
-            gameplayDt = dt * HITSTOP_SCALE;
-          }
-          self.update(gameplayDt);
-        }
-        self.render();
-      };
-      this._rafId = global.requestAnimationFrame(this._step);
-    },
-
-    stop: function () {
-      this.running = false;
-      if (this._rafId) global.cancelAnimationFrame(this._rafId);
-      this._rafId = 0;
-    },
-
-    /* PHASE 6.1: 타격 성공 시 enemy.js 가 호출한다. 아주 짧은 지속시간을 기대한다
-       (권장 0.03~0.06초). 같은 프레임에 여러 히트가 겹쳐도 시간이 계속 늘어나지
-       않도록(작업 중첩 방지) 더 긴 쪽으로만 갱신한다. */
-    hitStop: function (duration) {
-      this.hitStopT = Math.max(this.hitStopT, duration);
-    },
-
-    /* LAZY DINER STEP 15: 첫 1분의 혼잣말 한 번짜리 토스트. 이미 보여 줬으면 false —
-       호출한 쪽이 평소 토스트로 되돌아가면 된다. 기존 토스트 슬롯을 그대로 쓰므로
-       조작은 절대 막지 않고, 뒤이은 다른 토스트가 이걸 덮어써도 괜찮다. */
-    hintOnce: function (key, text, holdMs) {
-      if (this._hintSeen[key]) return false;
-      this._hintSeen[key] = true;
-      if (MG.UI && MG.UI.showToast) MG.UI.showToast(text, holdMs);
+    cycleSpell: function () {
+      var S = MG.S; if (S.spells.length < 2) { if (MG.FX) MG.FX.text(MG.Player.x, MG.Player.y - 34, '아직 다른 마법이 없다', '#c8b898', 0.7, 10); return false; }
+      S.spellSel = (S.spellSel + 1) % S.spells.length;
+      if (MG.FX) MG.FX.text(MG.Player.x, MG.Player.y - 34, '✨ ' + D.SPELLS[S.spells[S.spellSel]].name, '#bff6ff', 0.9, 11);
       return true;
     },
 
-    /* 타이틀 화면에서 "모험 시작"을 눌렀을 때 */
-    startAdventure: function () {
-      this.state = 'PLAY';
-      // PHASE 9 폴리시: 여기서부터 조작 컨트롤이 나타난다 (타이틀에서는 숨겨져 있었다)
-      document.body.classList.add('mg-playing');
-      if (MG.UI && MG.UI.hideTitle) MG.UI.hideTitle();
-      this.hintOnce('start', HINT_START, HINT_HOLD_MS);   // LAZY DINER STEP 15
-    },
-
-    /* 카메라 — 맵이 화면보다 크므로 플레이어를 따라가되 맵 밖은 보여주지 않는다 */
-    camera: { x: 0, y: 0, w: INTERNAL_W, h: INTERNAL_H },
-
-    updateCamera: function () {
-      var cam = this.camera;
-      cam.w = INTERNAL_W;
-      cam.h = INTERNAL_H;
-
-      if (!MG.Player || !MG.Map) return;
-
-      cam.x = Math.round(MG.Player.x - INTERNAL_W / 2);
-      cam.y = Math.round(MG.Player.y - INTERNAL_H / 2);
-
-      // LAZY DINER STEP 1: 구역마다 지형이 시작하는 원점이 다를 수 있다
-      // (다이너는 바깥과 좌표가 겹치지 않도록 (2000,0)에서 시작한다).
-      // originX/Y 가 없으면(=바깥 구역) 0 이라 기존 동작과 완전히 같다.
-      var originX = MG.Map.originX || 0;
-      var originY = MG.Map.originY || 0;
-      var minX = originX, minY = originY;
-      var maxX = originX + MG.Map.WIDTH - INTERNAL_W;
-      var maxY = originY + MG.Map.HEIGHT - INTERNAL_H;
-      if (cam.x < minX) cam.x = minX;
-      if (cam.y < minY) cam.y = minY;
-      if (cam.x > maxX) cam.x = maxX;
-      if (cam.y > maxY) cam.y = maxY;
-    },
-
-    /* -------------------------------------------------------------- update */
-    update: function (dt) {
-      // PHASE 7 이후: 동료 갱신이 여기에 들어간다. 공격 상태 자체는
-      // player.js 의 update() 안에서 combat.js 를 통해 함께 진행된다.
-      if (MG.Input && MG.Input.update) MG.Input.update(dt);
-
-      // LAZY DINER STEP 4-3a: 다이너는 전투가 없는 안전지대다. attackPressed 를
-      // 읽는 곳은 player.js 의 공격 시작 판정 하나뿐이고 그건 이 아래
-      // Player.update() 에서 돈다 — 그래서 여기서 이번 프레임의 공격 입력만
-      // 지우면 스윙/히트박스/효과음이 전부 일어나지 않는다(키보드 Space 와
-      // 터치 공격 버튼 모두 이 한 플래그로 모인다). player/combat/input.js 는
-      // 건드리지 않는다. 다이너를 나가면 이 조건이 거짓이 되어 자동으로 복구된다.
-      if (MG.Input && MG.Map && MG.Map.zone === 'diner') MG.Input.attackPressed = false;
-
-      // LAZY DINER STEP 4-3b: 대화 중에는 조작이 대화로 완전히 넘어간다 — 이동/공격/
-      // 능력 입력을 이번 프레임에 한해 지운다. axis 는 새 객체로 바꾸지 않고 값만
-      // 0 으로 만든다(player.js 가 같은 객체를 읽는다). Input.update() 는 키를
-      // 누르고 있으면 매 프레임 axis 를 다시 채우므로 매 프레임 여기서 지운다.
-      // interactPressed 는 일부러 남긴다 — customer.js 가 E 입력을 "다음 줄"로
-      // 쓰기 때문이다(화로는 updateStove 의 대화 가드로 이미 막혀 있다).
-      // player/input.js 는 건드리지 않는다.
-      var speechOpen = !!(MG.UI && MG.UI.isSpeechOpen && MG.UI.isSpeechOpen());
-      if (MG.Input && (speechOpen || this._farewellStarted)) {
-        MG.Input.axis.x = 0;
-        MG.Input.axis.y = 0;
-        MG.Input.attackPressed = false;
-        MG.Input.abilityPressed = false;
-        // LAZY DINER STEP 5: 작별이 시작된 뒤에는 대사가 닫힌 다음(완료 화면이 뜰
-        // 때까지의 뜸)에도 상호작용을 잠근다. 대사가 열려 있는 동안만 interactPressed 를
-        // 남긴다 — 그때는 E 가 "다음 줄"이기 때문이다.
-        if (!speechOpen) MG.Input.interactPressed = false;
+    /* ---------------------------------------------------------------- 상호작용(메인 버튼 = 그 일) */
+    interact: function (c) {
+      var P = MG.Player, S = MG.S, o = c.obj, k;
+      if (c.kind === 'bonfire') { this.rest(o); return; }
+      if (c.kind === 'forge') { MG.Forge.openShop(); return; }
+      if (c.kind === 'stairs') { this.goDown(o); return; }
+      if (c.kind === 'exit') { this.useExit(o); return; }
+      if (c.kind === 'abyss') { var A = D.MAPS.abyss.arrive.in; this.enterMap('abyss', A[0], A[1]); return; }
+      if (c.kind === 'tomb') { var KT = D.MAPS.kingtomb.arrive.in; this.enterMap('kingtomb', KT[0], KT[1]); return; }   // v84 ⚔️ 왕의 무덤
+      if (c.kind === 'npc') { MG.NPC.talk(o); return; }          // v82 [💬 대화]
+      if (c.kind === 'beast') { MG.Gimmick.bless(o); return; }   // v82 [🔥 가호 받기]
+      if (c.kind === 'fell') { P.state = 'gather'; P.st = 0; P.combo = 0; P.face(o.x - P.x, o.y - P.y); MG.World.chop(o.ref); if (MG.Audio && MG.Audio.playShellClink) try { MG.Audio.playShellClink(); } catch (e) { /* 무음 */ } return; }
+      if (c.kind === 'chest') {
+        o.open = true; o.openT = 0; S.chests[o.id] = true;
+        var r = o.reward;
+        if (MG.FX) { MG.FX.burst(o.x, o.y - 8, 20, ['#ffd866', '#fff6c0', '#c08a34'], 90, { up: true }); MG.FX.shake(1.5, 0.12); }
+        if (MG.Audio && MG.Audio.playTreasureOpen) try { MG.Audio.playTreasureOpen(); } catch (e) { /* 무음 */ }
+        if (r.gold) for (k = 0; k < Math.ceil(r.gold / 10); k++) MG.Loot.drop(o.x, o.y - 6, 'gold', null, 10, { fountain: true });
+        if (r.mats) for (var m in r.mats) MG.Loot.drop(o.x, o.y - 6, 'mat', m, r.mats[m], { fountain: true });
+        if (r.spell) this.learn(r.spell);
+        if (r.relic) this.gainRelic(r.relic);   // v83 유물
+        if (r.seed) this.seed(o);
+        else if (r.estus) { S.estusMax = Math.min(D.PLAYER.ESTUS_MAX, S.estusMax + r.estus); P.estus += r.estus; if (MG.UI) MG.UI.ribbon('🧪 에스트 병이 늘었다 — 최대 ' + S.estusMax + '병', 2200); }
+        else if (!r.spell && MG.UI) MG.UI.ribbon('📦 보물상자를 열었다', 1600);
+        MG.Save.save(); return;
       }
-
-      /* PHASE 11 STEP 2: 프로토타입이 끝났으면 완료 화면을 올리고 진행을 멈춘다.
-         · 화면이 올라간 뒤에는 게임플레이 갱신을 통째로 건너뛴다 — 그래서 완료
-           이후 다시 진행되는 일도, 완료 이벤트가 두 번 일어나는 일도 없다.
-         · 루프 자체는 계속 돌기 때문에 숲은 배경으로 그대로 그려진다(render 는
-           update 바깥에 있다). 카메라만 유지해 화면이 튀지 않게 한다. */
-      if (this.gameComplete) {
-        if (this._completeShown) {
-          this.updateCamera();
-          return;
-        }
-        this._completeDelayT -= dt;
-        if (this._completeDelayT <= 0) {
-          this._completeShown = true;
-          if (MG.UI && MG.UI.showComplete) MG.UI.showComplete();
-        }
-      }
-
-      if (MG.Player && MG.Player.update) MG.Player.update(dt);
-      if (MG.Enemy && MG.Enemy.update) MG.Enemy.update(dt);
-      // PHASE 9 STEP 2 / LAZY DINER STEP 13: 모스키는 옛 기능이 켜져 있을 때만 움직인다.
-      if (this.LEGACY_MOSKI_ENABLED && MG.Companion && MG.Companion.update) MG.Companion.update(dt);
-      if (MG.Customer && MG.Customer.update) MG.Customer.update();      // LAZY DINER STEP 4-1
-      this.updateZoneTransition(dt);  // LAZY DINER STEP 1
-      this.updateMoonstone(dt);
-      this.updateCleansing(dt);
-      this.updateTreasure(dt);        // PHASE 10 STEP 3
-      this.updateStove();             // LAZY DINER STEP 3
-      this.updateRestartPrompt();
-      this.updateCamera();
-      if (DEBUG_MOBILE_LAYOUT) this.updateDebugPanel();
-    },
-
-    /* LAZY DINER STEP 2: 모슬링을 검으로 처치했을 때 enemy.js 가 정확히 한 번
-       호출한다 — 새 아이템/인벤토리 시스템을 만들지 않고 숫자 하나만 올린다.
-       기존 토스트(showToast)를 그대로 재사용해 알리고, HUD 숫자도 그 자리에서
-       갱신한다(매 프레임이 아니라 값이 바뀌는 순간에만 — hearts 와 같은 방식). */
-    addMeat: function (n) {
-      this.meat += n;
-      // LAZY DINER STEP 15: 처음 얻는 고기만 혼잣말이 평소 토스트를 대신한다.
-      if (!this.hintOnce('meat', HINT_MEAT, HINT_HOLD_MS) && MG.UI && MG.UI.showToast) {
-        MG.UI.showToast('고기 × ' + n + ' 획득');
-      }
-      if (MG.UI && MG.UI.renderMeat) MG.UI.renderMeat(this.meat);
-    },
-
-    /* LAZY DINER STEP 1: 문 발판(MG.Map.doorTrigger)을 밟으면 활성 구역을
-       바꾼다. 새 씬 관리자를 만들지 않는다 — MG.Map 이 이미 solids/ground/
-       WIDTH/HEIGHT/spawn 을 최상위 속성으로 들고 있고, 다른 모든 시스템이
-       그 값을 매 프레임 새로 읽으므로, Map.setZone() 으로 그 값들만
-       바꿔치기하고 플레이어를 그 구역의 spawn 으로 옮기면 그걸로 끝난다.
-       사망 중에는 전환하지 않는다(사망 연출/부활은 지금 있던 구역에서
-       그대로 끝나야 한다). */
-    updateZoneTransition: function (dt) {
-      // LAZY DINER STEP 5: 작별이 시작된 뒤에는 문이 다시 열리지 않는다 — 대사 중,
-      // 완료 화면이 뜨기 전의 뜸, 완료 화면 어느 때에도 플레이어는 다이너에 남는다.
-      // LAZY DINER STEP 11: 하루를 마치는 대사가 열려 있는 동안에도 마찬가지다.
-      if (this._farewellStarted || this._closingDay) return;
-
-      if (this._zoneCooldownT > 0) {
-        this._zoneCooldownT = Math.max(0, this._zoneCooldownT - dt);
+      if (c.kind === 'stele') {
+        if (o.kind === 'shrine') { this.shrine(o); return; }
+        if (o.kind === 'spell') { o.used = true; S.steles[o.id] = true; this.learn(o.spell); MG.Save.save(); return; }
+        var pool = D.RUNE_ORDER.filter(function (rr) { return S.runes.indexOf(rr) < 0; }), pick = [];
+        while (pool.length && pick.length < 3) pick.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
+        if (!pick.length) { o.used = true; S.steles[o.id] = true; return; }
+        if (MG.UI) MG.UI.openRunes(pick, function (rid) { S.runes.push(rid); o.used = true; S.steles[o.id] = true; MG.UI.ribbon(D.RUNES[rid].icon + ' ' + D.RUNES[rid].name + ' 각인 — ' + D.RUNES[rid].desc, 2400); MG.Save.save(); });
         return;
       }
-
-      var M = MG.Map, p = MG.Player;
-      if (!M || !p || !M.doorTrigger || !MG.Collision) return;
-      if (p.state === 'DEAD') return;
-
-      var r = MG.Collision.footRect(p.x, p.y, p.FOOT_W, p.FOOT_H);
-      var d = M.doorTrigger;
-      if (!MG.Collision.overlaps(r.x, r.y, r.w, r.h, d.x, d.y, d.w, d.h)) return;
-
-      // LAZY DINER STEP 5: 단서를 들은 뒤 다이너 문을 밟으면 밖으로 나가는 대신
-      // 작별 대사가 열린다. 구역 전환은 이번 프레임에 일어나지 않는다.
-      if (M.zone === 'diner' && this.clueHeard) {
-        this.startFarewell();
+      if (c.kind === 'node') {
+        var inf = MG.World.NODE_INFO[o.type], n = inf.n[0] + Math.floor(Math.random() * (inf.n[1] - inf.n[0] + 1));
+        o.taken = true; o.shakeT = 0.3;
+        P.state = 'gather'; P.st = 0; P.combo = 0; P.face(o.x - P.x, o.y - P.y);
+        if (MG.FX) { MG.FX.burst(o.x, o.y - 10, 12, o.type === 'tree' ? ['#965e30', '#4fa854', '#c08a4e'] : o.type === 'herb' ? ['#8ad070', '#4fa854'] : o.type === 'gold' ? ['#ffd866', '#fff6c0', '#6c7684'] : o.type === 'frost' ? ['#e4fdff', '#8ae8f8', '#ffffff'] : o.type === 'lava' ? ['#ff7424', '#ffb238', '#2a2430'] : ['#c4ccd6', '#6c7684', '#c4a8ff'], 70); MG.FX.text(o.x, o.y - 24, inf.emo + ' ' + inf.label + '!', '#ffe9b8', 0.7, 11); }
+        if (MG.Audio && MG.Audio.playShellClink) try { MG.Audio.playShellClink(); } catch (e) { /* 무음 */ }
+        MG.Loot.drop(o.x, o.y - 8, 'mat', inf.mat, n);
         return;
       }
-
-      // LAZY DINER STEP 11: 오늘 손님이 이미 떠났다면(앞의 두 밤) 문은 나가는 문이
-      // 아니라 "오늘 영업을 마치는" 문이다. 먹이기 전에는 위 분기를 모두 지나쳐
-      // 예전처럼 그냥 나간다.
-      if (M.zone === 'diner' && MG.Customer && MG.Customer.isGoneForToday &&
-          MG.Customer.isGoneForToday()) {
-        this.startClosingDay();
-        return;
-      }
-
-      var next = (M.zone === 'outside') ? 'diner' : 'outside';
-      M.setZone(next);
-      p.x = M.spawn.x;
-      p.y = M.spawn.y;
-      this._zoneCooldownT = ZONE_TRANSITION_COOLDOWN;
-
-      // LAZY DINER STEP 4-3a: 휘두르던 중에 문을 지나왔다면 그 스윙을 여기서
-      // 끝낸다(안전지대 안에서 칼이 0.22초 더 보이지 않게). 상태 값만 내릴 뿐
-      // player.js/combat.js 는 건드리지 않는다 — combat.advance() 는
-      // attacking 이 false 면 아무 것도 하지 않는다.
-      if (next === 'diner') {
-        p.attacking = false;
-        p.attackT = 0;
-      }
-      this.syncZoneClass();
-
-      // LAZY DINER STEP 4-1: 구역이 바뀌면 대화 상자를 반드시 닫는다 —
-      // 손님은 다이너에만 있으므로, 다이너를 나가는 순간 열려 있던 대화가
-      // 화면에 계속 떠 있으면 안 된다. onDone(단서 확보)은 부르지 않는다 —
-      // 끝까지 듣지 않고 나간 것이므로 그 보상은 다음에 다시 들어야 한다.
-      if (MG.UI && MG.UI.hideSpeech) MG.UI.hideSpeech();
-
-      // LAZY DINER STEP 10: 밖에서 다이너로 들어온 바로 이 프레임에 손님에게 알린다 —
-      // 나갔다 돌아오면 다음 밤이다(규칙은 customer.js 의 onArriveDiner 가 갖는다).
-      if (next === 'diner' && MG.Customer && MG.Customer.onArriveDiner) {
-        MG.Customer.onArriveDiner();
-      }
-
-      // LAZY DINER STEP 15: 처음 다이너에 들어왔을 때의 혼잣말 — 고기를 들고 왔는지에 따라
-      // 문구가 다르다(빈손이면 "끓여 볼까"가 어긋난다). 첫날 첫 입장에는 손님의
-      // 도착 토스트가 없으므로 겹치지 않는다.
-      if (next === 'diner') {
-        this.hintOnce('enter', this.meat > 0 ? HINT_ENTER_MEAT : HINT_ENTER_EMPTY, HINT_HOLD_MS);
-      }
     },
-
-    /* LAZY DINER STEP 11: 하루를 마친다 — 손님이 떠난 뒤 문 발판을 밟으면 시작된다.
-       기존 대화 상자를 화자 이름 없이 연다(새 UI 없음). 끝까지 넘기면 finishDay 가
-       불린다. 대화가 열려 있는 동안의 조작 잠금은 기존 잠금이 맡는다. 대사를 열지
-       못하면 플레이어가 문 앞에 갇히지 않도록 곧바로 finishDay 로 넘어간다. */
-    startClosingDay: function () {
-      if (this._closingDay) return;
-      this._closingDay = true;
-
-      var self = this;
-      var opened = false;
-      if (MG.UI && MG.UI.showSpeech) {
-        MG.UI.showSpeech('', CLOSING_LINES, function () { self.finishDay(); });
-        opened = !!(MG.UI.isSpeechOpen && MG.UI.isSpeechOpen());
-      }
-      if (!opened) this.finishDay();
-    },
-
-    /* LAZY DINER STEP 11: 다음 날 아침 — 바깥 시작 지점에서 다시 시작한다. 고기와 라면은
-       그대로 가져간다. 모슬링은 기존 Enemy.init() 으로 9마리가 모두 돌아온다(정화된
-       숲에서는 돌아오지 않는 기존 규칙도 그대로다). 다음 밤이 시작되는 것은 여기
-       뿐이다 — 손님을 다시 WAITING 으로 돌리는 startNewDay 도 여기서만 부른다. */
-    finishDay: function () {
-      var M = MG.Map, p = MG.Player;
-
-      if (M && M.setZone) M.setZone('outside');
-      this.syncZoneClass();
-
-      if (p && M) {
-        p.x = M.spawn.x;
-        p.y = M.spawn.y;
-        p.facing = 'down';
-        p.attackFacing = 'down';
-        p.attacking = false;
-        p.attackT = 0;
-        p.cooldownT = 0;
-        p.moving = false;
-        p.hp = p.maxHp;
-        if (MG.UI && MG.UI.renderHearts) MG.UI.renderHearts(p.hp, p.maxHp);
-      }
-
-      // 대사를 넘기는 동안 눌려 있던 이동 키/조이스틱이 새 아침에 이어지지 않게 한다 —
-      // 바깥 시작 지점에서 문 발판까지는 46px 밖에 안 되어, 남아 있으면 곧바로 다시 들어간다.
-      if (MG.Input && MG.Input.reset) MG.Input.reset();
-
-      if (MG.Enemy && MG.Enemy.init) MG.Enemy.init();
-
-      var advanced = MG.Customer && MG.Customer.startNewDay && MG.Customer.startNewDay();
-      this._zoneCooldownT = ZONE_TRANSITION_COOLDOWN;
-
-      if (advanced && MG.UI && MG.UI.showToast) {
-        var c = MG.Customer.list[0];
-        var morning = c && MORNING_TOASTS[c.chapter];
-        if (morning) MG.UI.showToast(morning);
-      }
-
-      this._closingDay = false;
-    },
-
-    /* LAZY DINER STEP 5: 작별 시작. 한 번만 — _farewellStarted 가 곧 그 가드다.
-       손님의 작별 한 줄을 기존 대화 상자로 열고, 끝까지 넘기면 finishFarewell 이
-       불린다. 대화를 연 입력이 곧바로 닫아버리지 않는 것은 4-3b 의 입력 가드
-       (열린 직후 250ms 무시 + pointerdown 만 듣기)가 이미 보장한다. */
-    startFarewell: function () {
-      if (this._farewellStarted) return;
-      this._farewellStarted = true;
-
-      var self = this;
-      var opened = MG.Customer && MG.Customer.farewell &&
-        MG.Customer.farewell(function () { self.finishFarewell(); });
-
-      // 대사를 열지 못한 경우에도 엔딩이 멈춰 서서 문이 영영 막히는 일이 없게 한다.
-      if (!opened) this.finishFarewell();
-    },
-
-    /* LAZY DINER STEP 5: 작별 대사가 끝났다 — 기존 완료 흐름에 넘긴다.
-       body.mg-complete 를 여기서 미리 붙이는 이유: 대사가 닫히며 mg-talking 이
-       떨어지는 그 순간과 완료 화면이 뜨는 1.6초 뒤 사이에 조이스틱/버튼이
-       잠깐 다시 보이지 않게 하려는 것이다(같은 호출 안에서 뗐다 붙이므로 그
-       사이에 화면이 그려지지 않는다). 뜸/오버레이는 기존 COMPLETE_DELAY 와
-       showComplete() 를 그대로 쓴다. */
-    finishFarewell: function () {
-      if (this._farewellDone) return;
-      this._farewellDone = true;
-      document.body.classList.add('mg-complete');
-      this.checkPrototypeComplete();
-    },
-
-    /* LAZY DINER STEP 4-3a: 지금 구역을 body 클래스로 알린다 — style.css 가
-       다이너에서 공격 버튼을 숨긴다(mg-complete/mg-playing 과 같은 방식).
-       setZone() 을 부르는 모든 곳(구역 전환, 재시작) 뒤에 호출한다. */
-    syncZoneClass: function () {
-      var diner = !!(MG.Map && MG.Map.zone === 'diner');
-      document.body.classList.toggle('mg-diner', diner);
-    },
-
-    /* PHASE 8: 달의 돌 — 오직 "실제 검 히트박스가 겹쳤을 때"만 활성화된다.
-       걸어서 부딪히거나, 공격 버튼만 누르거나, 근처에 있다는 것만으로는
-       절대 발동하지 않는다 — 기존 전투 규칙을 그대로 따르기 위해
-       MG.Combat.getAttackHitbox() 가 null 이 아닐 때(=판정 활성 구간)의
-       사각형만 본다. 사전 타겟팅(findPreAttackTarget)은 모슬링 목록만
-       훑으므로 달의 돌을 겨냥하는 일도 없다(설계상 그대로 둔다). */
-    updateMoonstone: function (dt) {
-      // LAZY DINER STEP 7: 옛 기능이 꺼져 있으면 달의 돌은 아무 반응도 하지 않는다.
-      if (!this.LEGACY_MOONSTONE_ENABLED) return;
-      if (!MG.Map || !MG.Map.moonstone) return;
-      var m = MG.Map.moonstone;
-
-      if (m.state === 'ACTIVE') {
-        m.activeT += dt;   // 연출용 경과 시간일 뿐 — 게임 로직은 아니다
-        return;
-      }
-      if (this.moonstoneFound) return;          // 이미 끝난 목표 (이중 안전장치)
-      if (!MG.Player || MG.Player.state === 'DEAD') return;
-      if (!MG.Combat || !MG.Combat.getAttackHitbox || !MG.Collision) return;
-
-      var box = MG.Combat.getAttackHitbox(MG.Player);
-      if (!box) return;                          // 스윙 중이라도 판정 구간이 아니면 무시
-
-      var hit = MG.Map.getMoonstoneHitbox();
-      if (!MG.Collision.overlaps(box.x, box.y, box.w, box.h, hit.x, hit.y, hit.w, hit.h)) return;
-
-      this.activateMoonstone();
-    },
-
-    /* PHASE 8: 단 한 번만 실행되는 보상 시퀀스.
-       체력 회복 → 하트 UI 갱신 → 보상음 → 파티클 → 토스트.
-       플레이어의 위치/이동/사망 상태는 건드리지 않는다. */
-    activateMoonstone: function () {
-      if (this.moonstoneFound) return;
-      this.moonstoneFound = true;
-
-      var m = MG.Map.moonstone;
-      m.state = 'ACTIVE';
-      m.activeT = 0;
-
-      // A. 체력을 가득 채우고 하트를 즉시 갱신한다 (회복 아이템이 아니라 즉시 보상)
-      if (MG.Player) {
-        MG.Player.hp = MG.Player.maxHp;
-        if (MG.UI && MG.UI.renderHearts) MG.UI.renderHearts(MG.Player.hp, MG.Player.maxHp);
-      }
-
-      // B. 보상음 (오디오 실패가 게임을 막지 않는다 — audio.js 내부에서 try/catch)
-      if (MG.Audio && MG.Audio.playReward) MG.Audio.playReward();
-
-      // C. 돌을 중심으로 짧고 밝은 빛 폭발 (기존 파티클 시스템 재사용)
-      if (MG.Enemy && MG.Enemy.spawnParticles) {
-        MG.Enemy.spawnParticles(m.x, m.y - 4, 18, 0, -1, 'reward');
-      }
-
-      // D. PHASE 9.3: 여기서 '달의 돌을 발견했다' 토스트를 띄우지 않는다.
-      //    돌을 치는 순간 곧바로 정화가 시작되므로, 토스트와 '숲이 정화되었다'가
-      //    한 화면에 겹쳐 뜨면서 가장 중요한 순간의 메시지가 둘로 쪼개졌다.
-      //    이 결말에서는 '숲이 정화되었다' 하나만 남긴다.
-      //    (MG.UI.showToast 자체는 그대로 살아 있다 — 다른 이벤트에서 쓸 수 있다.)
-
-      // E. PHASE 8.1: 그리고 숲 전체가 정화된다 — 이 게임의 결말.
-      this.startCleansing(m.x, m.y);
-    },
-
-    /* PHASE 10 STEP 3: 보물 상자 — 덩굴 다리를 놓은 뒤에만 열 수 있다.
-
-       상호작용 버튼은 새로 만들지 않고 모스키가 쓰던 #btn-interact 를 그대로
-       쓴다. 두 주인이 버튼을 두고 다투지 않는 이유는 구조적이다:
-       companion.js 는 오직 RECRUITABLE 상태에서만 버튼을 매 프레임 제어하는데,
-       상자는 bridgeActivated 를 요구하고 그건 모스키가 이미 FOLLOWING 이라는
-       뜻이다. 두 조건은 동시에 참이 될 수 없다(게다가 모스키 공터와 상자는
-       880px 떨어져 있어 사거리 28px 가 겹칠 수도 없다). */
-    updateTreasure: function (dt) {
-      if (!MG.Map || !MG.Map.treasure) return;
-      var tr = MG.Map.treasure;
-
-      // 열리는 중 — 연출만 진행하고 상호작용은 받지 않는다(중복 개봉 차단)
-      if (tr.state === 'OPENING') {
-        tr.openT += dt;
-        if (tr.openT >= TREASURE_OPEN_TIME) {
-          tr.openT = TREASURE_OPEN_TIME;
-          tr.state = 'OPEN';
-          if (MG.Enemy && MG.Enemy.spawnParticles) {
-            MG.Enemy.spawnParticles(tr.x, tr.y - 10, 14, 0, -1, 'reward');
-          }
-          if (MG.UI && MG.UI.showToast) MG.UI.showToast('달빛 조각을 획득했다!');
-          // PHASE 11 STEP 1: 상자가 열린 이 순간이 Prototype 0.1 의 끝이다.
-          // 여기서는 감지만 한다 — 화면/문구/버튼은 만들지 않는다.
-          this.checkPrototypeComplete();
-        }
-        return;
-      }
-
-      // 이미 열었으면 끝이다 — 다시 열리지 않는다
-      if (tr.state !== 'CLOSED') { this.hideTreasurePrompt(); return; }
-
-      // 다리가 놓이기 전에는 상자에 대한 버튼도 E 도 전혀 반응하지 않는다
-      if (!this.bridgeActivated) {
-        this._treasureInRange = false;
-        this.hideTreasurePrompt();
-        return;
-      }
-
-      var p = MG.Player;
-      if (!p || p.state === 'DEAD') {
-        this._treasureInRange = false;
-        this.hideTreasurePrompt();
-        return;
-      }
-
-      var dx = p.x - tr.x, dy = p.y - tr.y;
-      var dist = Math.sqrt(dx * dx + dy * dy);
-      if (!this._treasureInRange && dist <= TREASURE_ENTER) this._treasureInRange = true;
-      else if (this._treasureInRange && dist > TREASURE_LEAVE) this._treasureInRange = false;
-
-      if (this._treasureInRange) this.showTreasurePrompt();
-      else this.hideTreasurePrompt();
-
-      if (this._treasureInRange && MG.Input && MG.Input.interactPressed) {
-        this.openTreasure();
-      }
-    },
-
-    /* 상자를 연다. 멱등이다 — CLOSED 가 아니면 아무 일도 하지 않는다. */
-    openTreasure: function () {
-      var tr = MG.Map && MG.Map.treasure;
-      if (!tr || tr.state !== 'CLOSED') return;
-
-      tr.state = 'OPENING';
-      tr.openT = 0;
-      this.hideTreasurePrompt();          // 버튼은 즉시 사라진다
-
-      if (MG.Audio && MG.Audio.playTreasureOpen) MG.Audio.playTreasureOpen();
-      if (MG.Enemy && MG.Enemy.spawnParticles) {
-        MG.Enemy.spawnParticles(tr.x, tr.y - 12, 8, 0, -1, 'reward');
-      }
-    },
-
-    /* LAZY DINER STEP 3: 화로 — 보물상자와 완전히 같은 사거리 히스테리시스
-       패턴이다(_stoveInRange 가 들어오면 버튼을 띄우고, 그 범위 안에서
-       기존 interactPressed 1프레임 엣지가 눌리면 딱 한 번만 요리한다).
-       화로는 다이너 좌표에만 존재하므로, 바깥에 있는 동안은 거리 판정이
-       항상 거짓이라 이 함수는 사실상 아무 일도 하지 않는다(달의 돌/보물과
-       같은 방식 — 구역 분기를 따로 두지 않아도 된다). */
-    updateStove: function () {
-      // LAZY DINER STEP 4-1: 손님과 대화 중에는 화로가 반응하지 않는다 —
-      // 화로/손님이 같은 공유 interactPressed 를 쓰므로, 대화창을 넘기는
-      // 입력이 실수로 요리까지 트리거하지 않게 막는다(사거리가 겹치지 않아
-      // 실제로는 거의 발생하지 않지만, 명시적으로 막아 둔다).
-      if (MG.UI && MG.UI.isSpeechOpen && MG.UI.isSpeechOpen()) return;
-
-      var s = MG.Map && MG.Map.stove;
-      var p = MG.Player;
-      if (!s || !p || p.state === 'DEAD') {
-        this._stoveInRange = false;
-        this.hideStovePrompt();
-        return;
-      }
-
-      var dx = p.x - s.x, dy = p.y - s.y;
-      var dist = Math.sqrt(dx * dx + dy * dy);
-      if (!this._stoveInRange && dist <= STOVE_INTERACT_ENTER) this._stoveInRange = true;
-      else if (this._stoveInRange && dist > STOVE_INTERACT_LEAVE) this._stoveInRange = false;
-
-      if (this._stoveInRange) this.showStovePrompt();
-      else this.hideStovePrompt();
-
-      if (this._stoveInRange && MG.Input && MG.Input.interactPressed) {
-        this.cookMeatRamen();
-      }
-    },
-
-    showStovePrompt: function () {
-      if (this._stovePromptShown) return;
-      this._stovePromptShown = true;
-      // LAZY DINER STEP 15: 화로는 손님의 🍜 처럼 무엇과 상호작용하는지 아이콘으로 알린다.
-      if (MG.UI && MG.UI.showInteract) MG.UI.showInteract(ICON_STOVE);
-    },
-
-    hideStovePrompt: function () {
-      if (!this._stovePromptShown) return;
-      this._stovePromptShown = false;
-      if (MG.UI && MG.UI.hideInteract) MG.UI.hideInteract();
-    },
-
-    /* LAZY DINER STEP 3: 재료 하나를 실제로 요리로 바꾼다 — 성공했을 때만
-       meat 를 소비한다(실패 시에는 아무 것도 줄지 않는다). 나중에 다른
-       요리가 추가될 걸 대비해 "이 요리를 만드는 함수" 하나를 그대로 두는
-       구조로만 남긴다 — 레시피 목록/조회 테이블은 아직 만들지 않는다. */
-    cookMeatRamen: function () {
-      if (this.meat >= 1) {
-        this.meat -= 1;
-        this.meatRamen += 1;
-        if (MG.UI && MG.UI.renderMeat) MG.UI.renderMeat(this.meat);
-        if (MG.UI && MG.UI.renderRamen) MG.UI.renderRamen(this.meatRamen);
-        // LAZY DINER STEP 15: 처음 만든 라면만 혼잣말이 평소 토스트를 대신한다.
-        if (!this.hintOnce('ramen', HINT_RAMEN, HINT_HOLD_MS) && MG.UI && MG.UI.showToast) {
-          MG.UI.showToast('고기라면을 만들었다.');
-        }
-      } else {
-        if (MG.UI && MG.UI.showToast) MG.UI.showToast('재료가 없다.');
-      }
-    },
-
-    /* PHASE 11 STEP 1: 지금 세 조건이 모두 충족되었는가 — 순수 판독 함수다.
-       아무 상태도 바꾸지 않으므로 언제 몇 번을 불러도 안전하다. */
-    isPrototypeComplete: function () {
-      // STEP 5: Lazy Diner 의 완료 조건 — 단서를 들었고, 작별까지 마쳤다.
-      // (예전 Moonlit 조건은 여기서 빠졌다. 보물 상자를 열어도 updateTreasure() 가
-      //  checkPrototypeComplete() 를 부르지만 이 조건이 거짓이라 아무 일도 없다.)
-      return this.clueHeard === true && this._farewellDone === true;
-    },
-
-    /* 완료 조건을 검사해 충족되면 빗장을 채운다. 반환값은 현재 완료 여부다.
-       finishFarewell() 이 부르고, 보물 상자 코드도 그대로 부른다(무해하다). */
-    checkPrototypeComplete: function () {
-      if (this.gameComplete) return true;        // 한 번 켜지면 계속 true
-      if (!this.isPrototypeComplete()) return false;
-      this.gameComplete = true;
+    /* v84 왕의 무덤의 봉인: 5대 괴수(거목 · 골렘 · 가시 군주 · 서리 송곳니 · 폭풍룡)를 모두 토벌하면 풀린다 */
+    bossesDown: function () { var S = MG.S, n = 0; D.BOSSES.forEach(function (b) { if (S.bosses[b.id] && S.bosses[b.id].kills > 0) n++; }); return n; },
+    kingReady: function () { return this.bossesDown() >= D.KING_GATE_NEED; },
+    /* v83 🏺 유물 획득: 처음 얻으면 바로 장착(빈 손일 때) — 📜 장비 창에서 언제든 바꾼다 */
+    gainRelic: function (id) {
+      var S = MG.S, R = D.RELICS[id], P = MG.Player; if (!R) return false;
+      S.relics = S.relics || []; if (S.relics.indexOf(id) >= 0) return false;
+      S.relics.push(id); if (!S.relic) S.relic = id;
+      if (MG.FX) { MG.FX.flash('#ffd866', 0.12); MG.FX.ring(P.x, P.y - 10, 4, 34, 0.6, '#ffd866', 3); MG.FX.text(P.x, P.y - 46, R.icon + ' ' + R.name, '#ffd866', 1.6, 13, { pop: true }); }
+      if (MG.UI) MG.UI.ribbon('🏺 유물 획득 — ' + R.icon + ' ' + R.name, 2400);
+      MG.emit('relic', id); if (MG.Save) MG.Save.save();
       return true;
     },
-
-    showTreasurePrompt: function () {
-      if (this._treasurePromptShown) return;
-      this._treasurePromptShown = true;
-      if (MG.UI && MG.UI.showInteract) MG.UI.showInteract();
+    equipRelic: function (id) { var S = MG.S; if (id && (S.relics || []).indexOf(id) < 0) return false; S.relic = id || null; if (MG.Save) MG.Save.save(); return true; },
+    /* 🧪 황금 씨앗: 에스트 최대 개수가 영구히 +1(3 → 최대 7) — 레벨업을 대신하는 탐험 보상 */
+    seed: function (o) {
+      var S = MG.S, P = MG.Player, before = S.estusMax;
+      S.seeds = (S.seeds || 0) + 1; S.estusMax = Math.min(D.PLAYER.ESTUS_MAX, S.estusMax + 1); P.estus = Math.min(S.estusMax, P.estus + (S.estusMax - before));
+      if (MG.FX) { MG.FX.flash('#ffd866', 0.15); MG.FX.ring(P.x, P.y - 10, 4, 34, 0.6, '#ffd866', 3); MG.FX.burst(o.x, o.y - 12, 26, ['#ffd866', '#fff6c0', '#7dff9a'], 100, { up: true, g: -30 }); }
+      if (MG.UI) MG.UI.ribbon('🧪 황금 씨앗! 에스트 물약 최대 ' + S.estusMax + '병' + (S.estusMax >= D.PLAYER.ESTUS_MAX ? ' (최대)' : ''), 2600);
+    },
+    /* ⛩️ 고대 성소: 최대 HP/MP/SP 통이 영구히 커진다 */
+    shrine: function (o) {
+      var S = MG.S, P = MG.Player, C = D.PLAYER.SHRINE, txt = [];
+      o.used = true; S.steles[o.id] = true; S.bonus = S.bonus || { hp: 0, mp: 0, sp: 0 };
+      for (var k in o.boost) { S.bonus[k] = (S.bonus[k] || 0) + o.boost[k]; txt.push((k === 'hp' ? '❤️ 최대 HP +' : k === 'mp' ? '🔷 최대 MP +' : '🟢 최대 SP +') + C[k] * o.boost[k]); }
+      P.refreshStats(false); P.hp = P.maxHp; P.mp = P.maxMp; P.sp = P.maxSp;
+      if (MG.FX) { MG.FX.flash('#fff3c0', 0.15); MG.FX.ring(o.x, o.y - 16, 4, 40, 0.7, '#ffd866', 3); MG.FX.burst(o.x, o.y - 20, 30, ['#ffd866', '#fff6c0', '#ffffff'], 110, { up: true, g: -30 }); }
+      if (MG.UI) MG.UI.ribbon('⛩️ 고대 성소 — ' + txt.join(' · '), 2600);
+      MG.Save.save();
+    },
+    learn: function (id) {
+      var S = MG.S; if (S.spells.indexOf(id) >= 0) return;
+      S.spells.push(id); S.spellSel = S.spells.length - 1;
+      if (MG.FX) { MG.FX.flash('#bff6ff', 0.15); MG.FX.ring(MG.Player.x, MG.Player.y - 8, 4, 40, 0.6, '#8ae8f8', 3); }
+      if (MG.UI) MG.UI.ribbon('✨ 새 비전 마법 — ' + D.SPELLS[id].name + '! (' + D.SPELLS[id].desc + ')', 2600);
+    },
+    /* 화톳불: 불을 붙이고 쉰다 — 체력/마력/기력/에스트 회복, 몬스터 · 토벌한 보스 · 채집 지점이 되살아난다(싸우던 보스는 그대로) */
+    rest: function (b) {
+      var P = MG.Player, S = MG.S, first = !b.lit;
+      b.lit = true; S.lit[b.id] = true; S.lastFire = b.id;
+      P.hp = P.maxHp; P.mp = P.maxMp; P.sp = P.maxSp; P.estus = S.estusMax; P.toIdle(); P.resetCooldowns(); S.phoenixUsed = false;   // v82: 마법 대기시간 · 주작의 재탄생도 다시
+      MG.Enemies.spawnAll(); MG.Bosses.respawn(); MG.World.regrow(); MG.Shots.reset();
+      if (MG.FX) { MG.FX.flash('#ffb060', 0.18); MG.FX.burst(b.x, b.y - 14, 26, ['#ffb238', '#ffe890', '#ff7424'], 70, { up: true, g: -40 }); }
+      if (MG.UI) MG.UI.ribbon(first ? '🔥 화톳불 점화 — ' + b.name : '🔥 휴식 — 체력 · 마력 · 에스트 회복 (적이 되살아났다)', 2200);
+      MG.emit('rest', b);
+      MG.Save.save();
+      if (MG.UI && MG.UI.openWarp) MG.UI.openWarp(b.id);   // 쉬고 나면 「🔥 화톳불 전송」 고르기
+    },
+    /* 화톳불 전송(Fast Travel): 불을 붙인 화톳불로만(5곳). 도착 자리는 화톳불 바로 아래의 막히지 않은 곳. */
+    warpSpot: function (f) {
+      var W = MG.World, tries = [[0, 26], [0, 34], [22, 22], [-22, 22], [26, 0], [-26, 0], [0, -26]];
+      for (var i = 0; i < tries.length; i++) { var x = f.x + tries[i][0], y = f.y + tries[i][1]; if (!W.blocked(x, y, MG.Player.r) && !W.barrierNear(x, y, MG.Player.r + 2)) return { x: x, y: y }; }
+      var p = W.resolve(f.x, f.y + 30, MG.Player.r); return { x: p.x, y: p.y };
+    },
+    warp: function (id) {
+      var P = MG.Player, S = MG.S;
+      if (!MG.World.isField()) { var df = MG.World.bonfire(id); if (!df || !S.lit[id]) return false; this.enterMap('field', df.x, df.y + 26, true); }
+      var f = this.fire(id);
+      if (!f || !f.lit) return false;
+      if (MG.FX) MG.FX.ring(P.x, P.y - 10, 4, 34, 0.5, '#4deeea', 3);
+      var spot = this.warpSpot(f);
+      P.toIdle(); P.place(spot.x, spot.y); P.vx = 0; P.vy = 0; P.face(0, 1);
+      S.lastFire = id; MG.Shots.reset(); MG.Magic.reset();
+      this.snapCam(); this.biome = MG.World.biomeAt(P.x, P.y);
+      if (MG.FX) { MG.FX.flash('#4deeea', 0.15); MG.FX.ring(P.x, P.y - 10, 30, 4, 0.5, '#eef6ff', 2); MG.FX.burst(P.x, P.y - 12, 26, ['#4deeea', '#eef6ff', '#8aa4c8'], 80, { up: true, g: -30 }); }
+      if (MG.UI) MG.UI.ribbon('🌀 영혼의 폭풍을 타고 — ' + f.name + '(으)로 전송', 2200);
+      MG.Save.save();
+      MG.emit('warp', f);
+      return true;
+    },
+    onDeath: function () {
+      var P = MG.Player, S = MG.S;
+      this.deadT = 0;
+      if (S.gold > 0) { S.blood = { x: Math.round(P.x), y: Math.round(P.y), n: S.gold, map: MG.World.id }; MG.Loot.blood(P.x, P.y, S.gold); S.gold = 0; }
+      if (MG.FX) { MG.FX.slow(0.4, 0.8); MG.FX.shake(4, 0.4); }
+      MG.Save.save();
+    },
+    /* 사망 → 마지막 화톳불에서 깨어난다. 보스는 오직 이때만 처음 상태로 돌아간다(싸우던 보스 · 투기장). */
+    respawn: function () {
+      var P = MG.Player, S = MG.S, fid = S.lastFire, df = MG.World.bonfire(fid) || D.MAPS.field.bonfires[0];
+      MG.Bosses.list.concat(MG.Bosses.extra || []).forEach(function (b) { if (b.alive && b.engaged) b.disengage(); });
+      if (MG.Tempest && MG.Tempest.on) MG.Tempest.end(false, true);
+      MG.Bosses.arena = null; MG.Bosses.arenaBoss = null; MG.Bosses.arenaDone = false;
+      if (!MG.World.isField()) this.enterMap('field', df.x, df.y + 26, true);
+      var f = this.fire(fid) || MG.World.bonfires[0];
+      P.init(); P.place(f.x, f.y + 26); S.phoenixUsed = false; if (MG.NPC) MG.NPC.close();
+      MG.Enemies.spawnAll(); MG.Shots.reset(); MG.Magic.reset();
+      this.snapCam();
+      if (MG.UI) MG.UI.ribbon('🔥 ' + f.name + '에서 깨어났다 — 핏자국에서 골드를 되찾자', 2200);
     },
 
-    hideTreasurePrompt: function () {
-      if (!this._treasurePromptShown) return;
-      this._treasurePromptShown = false;
-      if (MG.UI && MG.UI.hideInteract) MG.UI.hideInteract();
-    },
+    /* ---------------------------------------------------------------- 카메라 */
+    camTarget: function () { var P = MG.Player, W = MG.World; return { x: W.W <= MG.VW ? (W.W - MG.VW) / 2 : U.clamp(P.x - MG.VW / 2, 0, W.W - MG.VW), y: W.H <= MG.VH ? (W.H - MG.VH) / 2 : U.clamp(P.y - MG.VH / 2 - 8, 0, W.H - MG.VH) }; },
+    snapCam: function () { var t = this.camTarget(); this.cam.x = t.x; this.cam.y = t.y; },
+    updateCam: function (dt) { var t = this.camTarget(), k = Math.min(1, dt * 8); this.cam.x += (t.x - this.cam.x) * k; this.cam.y += (t.y - this.cam.y) * k; },
 
-    /* PHASE 8.1-B: 정화 시작. 게임을 멈추지 않고(컷신 없음) 아주 짧은
-       히트스탑만 걸어 "쿵" 하는 무게를 준다 — 기존 hitStop() 은 dt 배율만
-       낮출 뿐 입력을 막지 않으므로 조작권은 계속 플레이어에게 있다. */
-    startCleansing: function (x, y) {
-      if (this.cleansed) return;
-      this.cleansed = true;
-      this.cleanse = { t: 0, x: x, y: y };
-
-      this.hitStop(0.08);
-
-      // PHASE 9.2: 숲의 공기도 함께 바뀐다 — 새 소리를 켜는 게 아니라,
-      // 이미 깔려 있던 앰비언스 한 겹의 값만 2초에 걸쳐 옮긴다.
-      if (MG.Audio && MG.Audio.setAmbientMode) MG.Audio.setAmbientMode('cleansed');
-
-      if (MG.UI && MG.UI.showVictory) MG.UI.showVictory('숲이 정화되었다');
-    },
-
-    /* PHASE 9.1: 정화가 끝난 뒤 "다시 모험하기" 문구를 띄울지 정한다.
-       조건은 두 가지뿐이다 — 이미 정화되었고(cleansed), 플레이어가 처음
-       출발했던 공터(MG.Map.spawn) 근처로 스스로 돌아왔을 때.
-       정화 직후에는 플레이어가 달의 돌(700,400) 옆에 있어 스폰(200,590)에서
-       430px 넘게 떨어져 있으므로, 구조적으로 곧바로 뜨지 않는다 — 정화된 숲을
-       원하는 만큼 돌아다닌 뒤 돌아왔을 때만 나타난다.
-       DOM 은 상태가 바뀌는 순간에만 건드린다(매 프레임 접근하지 않는다). */
-    updateRestartPrompt: function () {
-      var show = false;
-
-      if (this.cleansed && !this.cleanse && MG.Map && MG.Map.spawn &&
-          MG.Player && MG.Player.state !== 'DEAD') {
-        var sp = MG.Map.spawn;
-        var d = Math.hypot(MG.Player.x - sp.x, MG.Player.y - sp.y);
-        // 히스테리시스: 들어올 땐 70, 나갈 땐 92 — 경계에서 깜빡이지 않는다
-        show = this._restartPromptShown ? (d <= RESTART_LEAVE_RADIUS)
-                                        : (d <= RESTART_ENTER_RADIUS);
-      }
-
-      if (show === this._restartPromptShown) return;
-      this._restartPromptShown = show;
-
-      if (!MG.UI) return;
-      if (show) {
-        // 실제 플레이에서 둘이 동시에 뜰 일은 없지만(토스트는 달의 돌 옆에서만,
-        // 이 문구는 스폰 근처에서만 뜬다), 화면 위치가 가까우므로 혹시 남아 있는
-        // 토스트가 있으면 먼저 치운다 — 어차피 지난 알림이다.
-        if (MG.UI.hideToast) MG.UI.hideToast();
-        if (MG.UI.showRestartPrompt) MG.UI.showRestartPrompt('다시 모험하기');
-      } else {
-        if (MG.UI.hideRestartPrompt) MG.UI.hideRestartPrompt();
-      }
-    },
-
-    /* PHASE 9.1: 세션 리셋 — 브라우저를 새로고침하지 않고 처음 상태로 되돌린다.
-       초기화 로직을 새로 쓰지 않고 기존 진입점(Player.init / Enemy.init /
-       Input.reset)을 그대로 재사용한다. 저장/불러오기는 없다.
-       순서가 중요하다: Enemy.init() 은 cleansed 가 true 면 모슬링을 만들지 않고
-       조기 반환하므로(정화 후 부활에서 적이 돌아오지 않게 하는 장치),
-       반드시 cleansed 를 먼저 내린 뒤에 호출해야 한다. */
-    restartSession: function () {
-      // LAZY DINER STEP 1: 재시작은 항상 바깥 구역에서 다시 시작한다
-      // (Player.init() 이 아래에서 MG.Map.spawn 을 읽으므로 그보다 먼저 해야 한다).
-      if (MG.Map && MG.Map.setZone) MG.Map.setZone('outside');
-      this._zoneCooldownT = 0;
-      this.syncZoneClass();   // LAZY DINER STEP 4-3a: 공격 버튼이 다시 보이게
-
-      // LAZY DINER STEP 2/3: 고기와 요리 모두 새 세션에서는 0부터 다시 시작한다.
-      this.meat = 0;
-      this.meatRamen = 0;
-      if (MG.UI && MG.UI.renderMeat) MG.UI.renderMeat(0);
-      if (MG.UI && MG.UI.renderRamen) MG.UI.renderRamen(0);
-      this._stoveInRange = false;
-      this._stovePromptShown = false;
-
-      // LAZY DINER STEP 4-1: 손님도 처음 상태(WAITING/chapter 0)로, 단서도
-      // 못 들은 것으로, 열려 있을지 모르는 대화 상자도 즉시 닫는다.
-      this.clueHeard = false;
-      this._farewellStarted = false;   // LAZY DINER STEP 5: 엔딩도 처음부터
-      this._farewellDone = false;
-      this._closingDay = false;        // LAZY DINER STEP 11
-      if (MG.UI && MG.UI.hideSpeech) MG.UI.hideSpeech();
-      if (MG.Customer && MG.Customer.init) MG.Customer.init();
-
-      // 1) 정화/목표 상태를 먼저 되돌린다
-      this.cleansed = false;
-      this.cleanse = null;
-      this.atmosphere = 0;
-      this.moonstoneFound = false;
-      this.bridgeActivated = false;   // PHASE 10 STEP 1: 재시작이면 다리도 처음 상태로
-      if (MG.Map && MG.Map.resetBridge) MG.Map.resetBridge();  // 강이 다시 완전히 막힌다
-      // PHASE 10 STEP 3: 상자도 다시 닫힌다 (새 세션에서 다시 열 수 있어야 한다).
-      // 저장 상태를 새로 만들지 않는다 — 이번 세션 동안만 유지되는 값이다.
-      if (MG.Map && MG.Map.treasure) {
-        MG.Map.treasure.state = 'CLOSED';
-        MG.Map.treasure.openT = 0;
-      }
-      this._treasureInRange = false;
-      this._treasurePromptShown = false;
-      // PHASE 11 STEP 1: 완료 빗장도 반드시 풀린다 — 새 세션은 처음부터다.
-      this.gameComplete = false;
-      // PHASE 11 STEP 2: 완료 화면도 함께 걷어낸다(조작 컨트롤이 다시 나타난다).
-      this._completeShown = false;
-      this._completeDelayT = COMPLETE_DELAY;
-      if (MG.UI && MG.UI.hideComplete) MG.UI.hideComplete();
-      this.hitStopT = 0;
-
-      // 2) 달의 돌을 다시 잠들게 한다
-      if (MG.Map && MG.Map.moonstone) {
-        MG.Map.moonstone.state = 'IDLE';
-        MG.Map.moonstone.activeT = 0;
-      }
-
-      // 3) 플레이어와 모슬링 — 기존 초기화 함수를 그대로 쓴다
-      //    (Player.init 이 위치/HP/공격/무적/어시스트 상태를 모두 되돌리고,
-      //     Enemy.init 이 9마리를 원래 스폰 지점에 다시 배치한다)
-      if (MG.Player && MG.Player.init) MG.Player.init();
-      if (MG.Enemy && MG.Enemy.init) MG.Enemy.init();
-      // PHASE 9 STEP 3: 모스키도 기존 init() 을 그대로 재사용해 다시 묶인다
-      // (TRAPPED / recruited=false / 300,235). 새 저장 상태를 만들지 않는다.
-      if (MG.Companion && MG.Companion.init) MG.Companion.init();
-      if (MG.Enemy && MG.Enemy.particles) MG.Enemy.particles.length = 0;
-
-      // 4) 문구를 누르느라 눌려 있던 입력이 남지 않도록 정리한다
-      if (MG.Input && MG.Input.reset) MG.Input.reset();
-
-      // PHASE 9.2: 숲의 공기도 처음 상태로 되돌린다 (앰비언스를 껐다 켜지
-      // 않는다 — 같은 체인의 값만 되돌아간다)
-      if (MG.Audio && MG.Audio.setAmbientMode) MG.Audio.setAmbientMode('forest');
-
-      // 5) UI 정리 — 승리 문구/토스트/재시작 문구를 모두 즉시 내린다
-      this._restartPromptShown = false;
-      if (MG.UI) {
-        if (MG.UI.hideRestartPrompt) MG.UI.hideRestartPrompt(true);
-        if (MG.UI.hideVictory) MG.UI.hideVictory();
-        if (MG.UI.hideToast) MG.UI.hideToast();
-        if (MG.UI.renderHearts && MG.Player) MG.UI.renderHearts(MG.Player.hp, MG.Player.maxHp);
-      }
-
-      // 타이틀로 되돌아가지 않는다 — 곧바로 다시 플레이한다
-      this.state = 'PLAY';
-    },
-
-    /* 파동을 퍼뜨리고(=닿는 순서대로 모슬링을 정화하고) 숲을 서서히 밝힌다. */
-    updateCleansing: function (dt) {
-      // 분위기 전환은 파동이 끝난 뒤에도 계속 이어진다
-      if (this.cleansed && this.atmosphere < 1) {
-        this.atmosphere = Math.min(1, this.atmosphere + dt / ATMOSPHERE_FADE);
-      }
-
-      var c = this.cleanse;
-      if (!c) return;
-
-      c.t += dt;
-      var radius = Math.min(1, c.t / CLEANSE_DURATION) * CLEANSE_MAX_RADIUS;
-
-      // 파동 앞면이 닿은 모슬링부터 차례로 사라진다 (enemy.js 의 기존 사망 연출)
-      if (MG.Enemy && MG.Enemy.cleanseAt) MG.Enemy.cleanseAt(c.x, c.y, radius);
-
-      if (c.t >= CLEANSE_DURATION) this.cleanse = null;
-    },
-
-    /* v0.1.1: DEBUG_MOBILE_LAYOUT 이 true 일 때만 동작하는 개발용 정보 패널.
-       화면 크기 / 캔버스 논리 해상도 / 방향 / 카메라 크기 / 입력값을 보여준다. */
-    updateDebugPanel: function () {
-      var el = document.getElementById('debug-panel');
-      if (!el) return;
-      el.hidden = false;
-      var v = this.viewportSize();
-      var axis = (MG.Input && MG.Input.axis) || { x: 0, y: 0 };
-      var joyActive = !!(MG.Input && MG.Input._joyPointerId !== null && MG.Input._joyPointerId !== undefined);
-      el.textContent =
-        'viewport: ' + Math.round(v.w) + ' x ' + Math.round(v.h) + '\n' +
-        'canvas(logical): ' + INTERNAL_W + ' x ' + INTERNAL_H + '\n' +
-        'orientation: ' + (v.w >= v.h ? 'landscape' : 'portrait') + '\n' +
-        'camera: ' + this.camera.w + ' x ' + this.camera.h +
-          ' @ (' + this.camera.x + ', ' + this.camera.y + ')\n' +
-        'input: x=' + axis.x.toFixed(2) + ' y=' + axis.y.toFixed(2) + '\n' +
-        'joystick active: ' + joyActive;
-    },
-
-    /* -------------------------------------------------------------- render */
+    /* ---------------------------------------------------------------- 그리기 */
     render: function () {
-      var ctx = this.ctx;
-      if (!ctx) return;
-
-      if (!MG.Map || !MG.Map.ground) {
-        // 맵이 준비되지 않았을 때의 안전한 대체 화면
-        this.drawPlaceholderScene(ctx);
-        if (MG.Player && MG.Player.render) MG.Player.render(ctx);
-        this.drawVignette(ctx);
-        return;
-      }
-
-      var cam = this.camera;
+      var g = this.g; if (!g) return;
       var t = this.time;
-
-      ctx.save();
-      ctx.translate(-cam.x, -cam.y);
-
-      MG.Map.renderGround(ctx);
-      MG.Map.renderWater(ctx, cam, t);
-      // PHASE 10 STEP 2: 다리는 물 바로 위, 엔티티보다 아래에 깔린다.
-      // (올라서는 바닥이므로 루카/모스키를 가려서는 안 된다)
-      if (MG.Map.renderBridge) MG.Map.renderBridge(ctx, cam, t);
-
-      // 나무/바위/모슬링/플레이어를 발 높이(y) 순으로 그려 앞뒤 관계를 만든다
-      var props = MG.Map.collectProps([], cam);
-      if (MG.Enemy && MG.Enemy.collect) MG.Enemy.collect(props, cam);
-      // PHASE 9 STEP 2 / LAZY DINER STEP 13: 옛 기능이 꺼져 있으면 모스키는 그려지지 않는다.
-      if (this.LEGACY_MOSKI_ENABLED && MG.Companion && MG.Companion.collect) MG.Companion.collect(props, cam);
-      if (MG.Customer && MG.Customer.collect) MG.Customer.collect(props, cam);     // LAZY DINER STEP 4-1
-      if (MG.Player) {
-        props.push({ y: MG.Player.y, kind: 'player' });
+      g.setTransform(1, 0, 0, 1, 0, 0); g.imageSmoothingEnabled = false;
+      if (this.state === 'TITLE') { this.renderTitle(g, t); return; }
+      var ST = MG.Story; if (ST && ST.active && !ST.worldBg()) { ST.render(g, t); return; }   // v86 컷씬(크레딧은 야영지 월드 위에)
+      if (MG.Forge.open) {   // v81: 화면 가운데 360×640 작업대 — 둘레는 대장간 돌벽과 화덕 불빛이 화면 끝까지
+        var fs = Math.min(1, MG.H / 640, MG.W / 360);
+        MG.Forge.view = { fs: fs, ox: Math.round((MG.W - 360 * fs) / 2), oy: Math.round((MG.H - 640 * fs) / 2) };
+        MG.Forge.render(g, t); return;
       }
-      props.sort(function (a, b) { return a.y - b.y; });
-
-      for (var i = 0; i < props.length; i++) {
-        if (props[i].kind === 'player') {
-          if (MG.Player.render) MG.Player.render(ctx);
-        } else if (props[i].kind === 'enemy') {
-          MG.Enemy.renderOne(ctx, props[i].obj);
-        } else if (props[i].kind === 'companion') {
-          MG.Companion.renderOne(ctx, props[i].obj);   // PHASE 9 STEP 2
-        } else if (props[i].kind === 'customer') {
-          MG.Customer.renderOne(ctx, props[i].obj);    // LAZY DINER STEP 4-1
-        } else {
-          MG.Map.renderProp(ctx, props[i]);
+      var sh = MG.FX.shakeOffset(), cam = { x: Math.round(this.cam.x * MG.Z) / MG.Z, y: Math.round(this.cam.y * MG.Z) / MG.Z }, W = MG.World;
+      g.fillStyle = W.isField() ? '#1a2a1a' : '#06070c'; g.fillRect(0, 0, MG.W, MG.H);
+      var vw = MG.FX.view(cam); this.camZoom = vw.s / MG.Z;   // v85 다이내믹 액션 카메라: 임팩트 줌(타격 지점 중심) + 방향성 카메라 펀치
+      g.setTransform(vw.s, 0, 0, vw.s, vw.ox + sh.x, vw.oy + sh.y);
+      W.drawVoid(g, cam, t);   // v81: 맵이 화면보다 좁으면(던전 방) 바깥은 어두운 심연 석재 + 안개
+      W.drawGround(g, cam, t);
+      W.drawLights(g, cam, t);
+      MG.FX.drawGround(g); MG.Shots.drawGround(g, t); MG.Magic.drawGround(g, t); MG.Enemies.drawWarn(g); MG.Bosses.drawWarn(g, t); MG.Player.drawLock(g, t);
+      var list = [], P = MG.Player;
+      W.collect(list, cam); MG.Loot.collect(list, cam); MG.Enemies.collect(list, cam); MG.Bosses.collect(list, cam); if (MG.Companion) MG.Companion.collect(list, cam);
+      list.push({ y: P.y, o: P, f: function (ctx, o, tt) { o.draw(ctx, tt); } });
+      list.sort(function (a, b) { return a.y - b.y; });
+      for (var i = 0; i < list.length; i++) list[i].f(g, list[i].o, t);
+      P.drawGhosts(g);
+      MG.Shots.draw(g, t); MG.Magic.drawAir(g, t); MG.FX.drawWorld(g);
+      if (W.drawLightsAfter) W.drawLightsAfter(g, cam, t);   // v83 HD-2D 동적 광원(가산)
+      // 화면 좌표
+      g.setTransform(1, 0, 0, 1, 0, 0);
+      var bio = W.biomeAt(P.x, P.y);
+      this.drawWeather(g, bio, cam, t);
+      if (MG.Tempest) MG.Tempest.drawSky(g, cam, t);   // v83 붉은 폭풍의 밤
+      var th = !W.isField() && W.THEME[W.map.theme], vg = g.createRadialGradient && g.createRadialGradient(MG.W / 2, MG.H / 2, Math.min(MG.W, MG.H) * 0.42, MG.W / 2, MG.H / 2, Math.max(MG.W, MG.H) * 0.66);
+      var VCOL = { ruins: 'rgba(40, 6, 10, 0.32)', crystal: 'rgba(10, 8, 40, 0.28)', forest: 'rgba(4, 16, 8, 0.24)', glacier: 'rgba(20, 40, 70, 0.3)', volcano: 'rgba(40, 6, 4, 0.38)' };
+      if (vg && vg.addColorStop) { vg.addColorStop(0, 'rgba(0, 0, 0, 0)'); vg.addColorStop(1, th ? 'rgba(0, 0, 0, 0.6)' : VCOL[bio]); g.fillStyle = vg; g.fillRect(0, 0, MG.W, MG.H); }
+      if (th) { g.fillStyle = th.fog; g.fillRect(0, 0, MG.W, MG.H); }
+      this.drawBubble(g, cam, t);
+      MG.FX.drawScreen(g, cam);
+      if (P.state === 'dead') {
+        var a = U.clamp(P.st / 0.8, 0, 1);
+        g.fillStyle = 'rgba(0, 0, 0, ' + (0.45 * a).toFixed(2) + ')'; g.fillRect(0, MG.H / 2 - 70, MG.W, 90);
+        g.globalAlpha = a; g.font = '30px Galmuri11, serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillStyle = '#c8243a'; g.fillText('사 망 했 다', MG.W / 2, MG.H / 2 - 25); g.globalAlpha = 1;
+      }
+      if (ST && ST.active) ST.render(g, t);   // v86 엔딩 크레딧(야영지 위로 올라간다)
+    },
+    /* 날씨(화면 좌표, 상태 없음): ❄️ 빙하 협곡 = 비스듬한 눈보라 · 🌋 용화산 = 떠오르는 재와 불티 · 얼음 궁전 = 가는 눈 */
+    drawWeather: function (g, bio, cam, t) {
+      var i, n, W = MG.World, theme = !W.isField() && W.map.theme;
+      if (bio === 'glacier' || theme === 'ice') {
+        var aw = MG.W + 40, ah = MG.H + 60, ar = Math.max(1, MG.W * MG.H / (360 * 640));
+        n = Math.round((bio === 'glacier' ? 120 : 50) * ar);
+        for (i = 0; i < n; i++) {
+          var sp = 60 + (i % 5) * 18, ph = (t * sp + i * 97) % ah, x = ((((i * 53 + cam.x * 2.2 + ph * 0.55) % aw) + aw) % aw) - 20, y = ((ph + i * 31 - cam.y * 2) % ah + ah) % ah - 30;
+          g.fillStyle = i % 4 ? 'rgba(240, 248, 255, 0.75)' : 'rgba(200, 230, 255, 0.5)'; g.fillRect(Math.round(x), Math.round(y), i % 7 === 0 ? 3 : 2, i % 7 === 0 ? 3 : 2);
         }
-      }
-
-      // LAZY DINER STEP 4-3a: 카운터 위 자리(매트/유리병/라면 그릇)는 y 정렬과
-      // 무관하게 소품 위에 그린다 — 카운터 앞에 선 플레이어가 그릇을 가리면
-      // "라면이 놓였다"는 피드백이 안 보이기 때문이다. 바깥에서는 카메라
-      // 밖이라 아무것도 보이지 않는다.
-      if (MG.Customer && MG.Customer.renderCounterItems) MG.Customer.renderCounterItems(ctx);
-
-      if (MG.Enemy && MG.Enemy.renderParticles) MG.Enemy.renderParticles(ctx);
-
-      MG.Map.renderFireflies(ctx, cam, t);
-
-      // PHASE 8.1: 정화 파동은 월드 좌표에 그린다 (카메라 변환이 아직 살아있는
-      // 이 지점이어야 돌을 중심으로 정확히 퍼진다)
-      this.renderCleanseWave(ctx);
-
-      // DEBUG_COMBAT 이 true 일 때만 그려진다 (combat.js 내부에서 조기 반환) —
-      // 카메라 변환이 아직 적용된 상태여야 히트박스가 월드 좌표와 정확히 겹친다.
-      if (MG.Combat && MG.Combat.renderDebug) MG.Combat.renderDebug(ctx, MG.Player);
-
-      ctx.restore();
-
-      // PHASE 8.1-C: 정화 전/후 공기감. LAZY DINER STEP 4-3a: 숲의 차가운 푸른
-      // 어둠은 다이너(따뜻한 실내)에는 깔지 않는다 — 손님이 배경과 분리돼 보이게.
-      if (!(MG.Map && MG.Map.zone === 'diner')) this.drawAtmosphere(ctx);
-      this.drawVignette(ctx);
-      this.drawCleanseFlash(ctx); // 활성화 순간의 아주 짧은 섬광 (맨 위)
-    },
-
-    /* PHASE 8.1: 달의 돌에서 퍼져나가는 정화 파동. 새 파티클 엔진이 아니라
-       캔버스 원 두어 개다 — 안쪽은 옅게 채워 "지나간 자리"를, 앞면은 또렷한
-       테두리로 "지금 지나가는 곳"을 보여준다. 세로 화면에서도 한눈에 읽힌다. */
-    renderCleanseWave: function (ctx) {
-      var c = this.cleanse;
-      if (!c) return;
-
-      var p = Math.min(1, c.t / CLEANSE_DURATION);
-      var r = p * CLEANSE_MAX_RADIUS;
-      var fade = 1 - p;                 // 퍼질수록 옅어진다
-      if (r <= 1) return;
-
-      ctx.save();
-
-      // 파동이 훑고 지나간 안쪽 — 은은한 달빛이 남는다
-      var inner = Math.max(0, r - 52);
-      var g = ctx.createRadialGradient(c.x, c.y, inner, c.x, c.y, r);
-      g.addColorStop(0, 'rgba(190, 226, 255, 0)');
-      g.addColorStop(0.72, 'rgba(202, 232, 255, ' + (0.16 * fade).toFixed(3) + ')');
-      g.addColorStop(1, 'rgba(238, 249, 255, ' + (0.36 * fade).toFixed(3) + ')');
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.arc(c.x, c.y, r, 0, Math.PI * 2);
-      ctx.fill();
-
-      // 파동 앞면 — 두꺼운 테두리 + 안쪽에 가는 흰 선을 겹쳐 속도감을 준다
-      ctx.strokeStyle = 'rgba(226, 244, 255, ' + (0.85 * fade).toFixed(3) + ')';
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.arc(c.x, c.y, r, 0, Math.PI * 2);
-      ctx.stroke();
-
-      ctx.strokeStyle = 'rgba(255, 255, 255, ' + (0.55 * fade).toFixed(3) + ')';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.arc(c.x, c.y, Math.max(1, r - 6), 0, Math.PI * 2);
-      ctx.stroke();
-
-      ctx.restore();
-    },
-
-    /* 활성화 직후 아주 짧게 화면 전체를 밝히는 섬광 (0.18초). 게임을 멈추지
-       않으며, 알파가 낮아 눈이 부시지 않는다. */
-    drawCleanseFlash: function (ctx) {
-      var c = this.cleanse;
-      if (!c || c.t > CLEANSE_FLASH) return;
-      var a = (1 - c.t / CLEANSE_FLASH) * 0.30;
-      ctx.fillStyle = 'rgba(226, 242, 255, ' + a.toFixed(3) + ')';
-      ctx.fillRect(0, 0, INTERNAL_W, INTERNAL_H);
-    },
-
-    /* PHASE 8.1-C: 정화 전/후의 공기감 대비.
-       색을 통째로 바꾸지 않고 아주 얇은 레이어 하나만 덮는다 —
-       정화 전에는 차갑게 눌러 무겁게, 정화 후에는 달빛으로 살짝 들어올린다. */
-    drawAtmosphere: function (ctx) {
-      var W = INTERNAL_W, H = INTERNAL_H;
-      var a = this.atmosphere;
-
-      if (a < 0.999) {
-        // 정화 전 — 푸른기 도는 어둠으로 살짝 가라앉힌다
-        ctx.fillStyle = 'rgba(6, 14, 24, ' + (0.18 * (1 - a)).toFixed(3) + ')';
-        ctx.fillRect(0, 0, W, H);
-      }
-      if (a > 0.001) {
-        // 정화 후 — 위에서 달빛이 스며든 것처럼 옅게 밝힌다
-        var lift = ctx.createLinearGradient(0, 0, 0, H);
-        lift.addColorStop(0, 'rgba(186, 216, 255, ' + (0.15 * a).toFixed(3) + ')');
-        lift.addColorStop(1, 'rgba(186, 216, 255, ' + (0.05 * a).toFixed(3) + ')');
-        ctx.fillStyle = lift;
-        ctx.fillRect(0, 0, W, H);
+        if (bio === 'glacier') { g.fillStyle = 'rgba(220, 236, 255, ' + (0.08 + 0.04 * Math.sin(t * 0.7)).toFixed(3) + ')'; g.fillRect(0, 0, MG.W, MG.H); }
+      } else if (bio === 'volcano' || theme === 'storm') {
+        var bw = MG.W + 20, nA = Math.round(70 * Math.max(1, MG.W * MG.H / (360 * 640)));
+        for (i = 0; i < nA; i++) {
+          var life = 5 + (i % 4), q = ((t + i * 0.73) % life) / life, ax = ((i * 71 - cam.x * 2) % bw + bw) % bw - 10 + Math.sin(t + i) * 10, ay = MG.H + 20 - q * (MG.H + 60);
+          g.globalAlpha = Math.sin(q * Math.PI) * 0.8; g.fillStyle = i % 3 ? '#4a4048' : (i % 2 ? '#ff7424' : '#ffb238'); g.fillRect(Math.round(ax), Math.round(ay), 2, 2);
+        }
+        g.globalAlpha = 1;
       }
     },
-
-    /* PHASE 4에서 실제 숲 맵(map.js)으로 교체될 임시 분위기 배경.
-       캔버스 렌더링/스케일 검증용이며 게임 로직은 포함하지 않는다. */
-    drawPlaceholderScene: function (ctx) {
-      var W = INTERNAL_W, H = INTERNAL_H, t = this.time;
-
-      // 밤 숲 바닥 그라데이션
-      var sky = ctx.createLinearGradient(0, 0, 0, H);
-      sky.addColorStop(0.0, '#132a24');
-      sky.addColorStop(0.45, '#1b3a2a');
-      sky.addColorStop(1.0, '#25492f');
-      ctx.fillStyle = sky;
-      ctx.fillRect(0, 0, W, H);
-
-      // 달빛 웅덩이
-      var moon = ctx.createRadialGradient(W * 0.5, H * 0.36, 6, W * 0.5, H * 0.36, H * 0.75);
-      moon.addColorStop(0, 'rgba(190, 220, 255, 0.20)');
-      moon.addColorStop(1, 'rgba(190, 220, 255, 0)');
-      ctx.fillStyle = moon;
-      ctx.fillRect(0, 0, W, H);
-
-      // 바닥 풀 결(가로 스트로크) — 정적인 패턴
-      ctx.fillStyle = 'rgba(20, 60, 38, 0.35)';
-      for (var y = 0; y < H; y += 6) {
-        var off = ((y * 37) % 11) - 5;
-        ctx.fillRect(off, y, W, 1);
+    /* 머리 위 작은 말풍선(📦열기 · 🪓벌목 · ⛏️채광 · 🔥화톳불 · 🔨대장간 · 🕳️내려가기) 또는 안내(💥 모아베기로 부수기) */
+    drawBubble: function (g, cam, t) {
+      var c = this.ctx || this.hint, P = MG.Player; if (!c || this.paused()) return;   // 창이 열려 시간이 멈춘 동안에는 말풍선을 감춘다
+      var an = c.kind === 'npc' && c.obj ? c.obj : P, pj = MG.FX.project(an.x, an.y, cam), sx = pj.x, sy = pj.y - (an === P ? 74 : 86) + Math.round(Math.sin(t * 4) * 2), act = !!this.ctx;   // v82: NPC 앞이면 말풍선은 NPC 머리 위에
+      g.font = '12px Galmuri11, sans-serif'; g.textAlign = 'left'; g.textBaseline = 'middle';
+      var txt = c.label, w = Math.ceil(g.measureText ? g.measureText(txt).width : txt.length * 12) + 30, h = 22, x = Math.round(U.clamp(sx - w / 2, 4, MG.W - w - 4)), y = Math.round(sy);
+      g.fillStyle = act ? 'rgba(20, 14, 8, 0.9)' : 'rgba(10, 10, 16, 0.72)'; g.fillRect(x, y, w, h);
+      g.strokeStyle = act ? '#ffd866' : 'rgba(200, 200, 220, 0.6)'; g.lineWidth = 2; g.strokeRect(x + 1, y + 1, w - 2, h - 2);
+      g.fillStyle = act ? 'rgba(20, 14, 8, 0.9)' : 'rgba(10, 10, 16, 0.72)'; g.beginPath(); g.moveTo(sx - 5, y + h); g.lineTo(sx + 5, y + h); g.lineTo(sx, y + h + 6); g.closePath(); g.fill();
+      var S = MG.Sprites;
+      if (act && c.rb && c.icon && S && S.ready('rb') && S.item('rb', c.icon)) S.draw(g, 'rb', c.icon, x + 12, y + 11, false, 1);
+      else if (act && c.icon && S && S.ready('icons') && S.item('icons', c.icon)) S.draw(g, 'icons', c.icon, x + 4, y + 3, false, 1); else { g.font = '12px sans-serif'; g.fillStyle = '#fff'; g.fillText(c.emo, x + 5, y + h / 2 + 1); g.font = '12px Galmuri11, sans-serif'; }
+      g.fillStyle = act ? '#fff3c0' : '#d8d8e8'; g.fillText(txt, x + 24, y + h / 2 + 1);
+    },
+    /* 타이틀(v79 → v81 풀스크린): 『SOUL TEMPEST』 — 화톳불 · 기사 · 바닥 타일 없이, 심연의 남색(#060913)이 화면 전체(레터박스 없음)를 덮는다.
+       화면 가운데 360×640 기둥(.tt-col)에 문장 · 로고 · 버튼이 서고, 캔버스는 그 둘레 전체에 폭풍을 그린다:
+       문장을 감싸 도는 칼바람 줄기 · 화면을 대각선으로 가로지르며 몰아치는 영혼의 칼바람(Wind Streaks) · 흘러가는 푸른 불씨와 은빛 재 · 남빛 안개. */
+    titleFrame: function () {
+      var W = MG.W, H = MG.H, fs = Math.min(1, H / 640, W / 360), top = (H - 640 * fs) / 2;
+      return { W: W, H: H, fs: fs, CX: W / 2, CY: top + 184 * fs };
+    },
+    renderTitle: function (g, t) {
+      var i, k, F = this.titleFrame(), W = F.W, H = F.H, CX = F.CX, CY = F.CY, fs = F.fs, area = W * H / (360 * 640);
+      var bg = g.createLinearGradient && g.createLinearGradient(0, 0, 0, H);
+      if (bg && bg.addColorStop) { bg.addColorStop(0, '#04060d'); bg.addColorStop(0.45, '#060913'); bg.addColorStop(1, '#0a1124'); g.fillStyle = bg; } else g.fillStyle = '#060913';
+      g.fillRect(0, 0, W, H);
+      // 문장 뒤의 차가운 청록 후광(숨 쉰다) + 아주 가끔 구름 속 번개빛
+      var br = 0.5 + 0.5 * Math.sin(t * 0.8), flick = (Math.sin(t * 0.37) > 0.985) ? 0.12 : 0;
+      var halo = g.createRadialGradient && g.createRadialGradient(CX, CY, 8, CX, CY, 230 * fs + Math.max(0, W - 360) * 0.25);
+      if (halo && halo.addColorStop) { halo.addColorStop(0, 'rgba(77, 238, 234, ' + (0.09 + 0.05 * br + flick).toFixed(3) + ')'); halo.addColorStop(0.45, 'rgba(60, 90, 140, 0.06)'); halo.addColorStop(1, 'rgba(0, 0, 0, 0)'); g.fillStyle = halo; g.fillRect(0, 0, W, H); }
+      var nStars = Math.round(26 * area);
+      for (i = 0; i < nStars; i++) { var sx = (i * 151 + 37) % W, sy = (i * 97 + 11) % Math.max(1, H * 0.6), tw = 0.25 + 0.75 * Math.abs(Math.sin(t * 0.7 + i * 2.3)); g.fillStyle = 'rgba(200, 220, 255, ' + (0.16 * tw).toFixed(3) + ')'; g.fillRect(Math.round(sx), Math.round(sy), 1, 1); }
+      // 화면 전체를 대각선(왼쪽 아래 → 오른쪽 위)으로 몰아치는 영혼의 칼바람 줄기
+      var ang = -0.42, ca = Math.cos(ang), sa = Math.sin(ang), span = W + H, nStreak = Math.round(44 * Math.max(1, area * 0.8));
+      g.lineCap = 'round';
+      for (k = 0; k < nStreak; k++) {
+        var spd = 120 + (k % 5) * 45, len = 40 + (k % 4) * 26, prog = ((t * spd + k * 211) % (span * 1.2 + 200)) - 100, lane = ((k * 97 + 13) % 101) / 101 * (span * 1.2) - span * 0.95;
+        var x0 = ca * prog - sa * lane, y0 = H + sa * prog + ca * lane;   // 왼쪽 아래에서 오른쪽 위로, lane 은 바람에 수직인 차선
+        if (x0 < -len || x0 > W + len || y0 < -len || y0 > H + len) continue;
+        g.strokeStyle = k % 3 === 0 ? 'rgba(238, 246, 255, 0.11)' : 'rgba(77, 238, 234, ' + (0.07 + 0.04 * (k % 2)).toFixed(2) + ')';
+        g.lineWidth = k % 4 === 0 ? 2 : 1;
+        g.beginPath(); g.moveTo(x0, y0); g.lineTo(x0 + ca * len, y0 + sa * len); g.stroke();
       }
-
-      // 떠다니는 숲의 빛(반딧불) — 애니메이션 동작 확인용
-      for (var i = 0; i < 14; i++) {
-        var seed = i * 12.9898;
-        var fx = (Math.sin(seed) * 0.5 + 0.5) * W;
-        var fy = (Math.cos(seed * 1.7) * 0.5 + 0.5) * H;
-        var drift = Math.sin(t * 0.6 + i) * 9;
-        var bob = Math.cos(t * 0.9 + i * 1.3) * 6;
-        var glow = 0.35 + 0.35 * Math.sin(t * 2.2 + i);
-        ctx.fillStyle = 'rgba(206, 244, 168, ' + glow.toFixed(3) + ')';
-        ctx.fillRect(Math.round(fx + drift), Math.round(fy + bob), 2, 2);
+      // 영혼의 폭풍: 문장 둘레를 도는 칼바람 줄기(나선으로 감겨 들어가는 호, 바깥은 은백 · 안쪽은 청록)
+      for (k = 0; k < 18; k++) {
+        var spin = t * (0.35 + (k % 4) * 0.08) * (k % 2 ? 1 : 1.15), R = (108 + (k % 6) * 22 + Math.sin(t * 0.6 + k) * 6) * fs;
+        var a0 = k * 2.1 + spin, ln = 0.5 + (k % 3) * 0.28;
+        g.strokeStyle = k % 3 === 0 ? 'rgba(238, 246, 255, 0.16)' : 'rgba(77, 238, 234, ' + (0.10 + 0.05 * (k % 2)).toFixed(2) + ')';
+        g.lineWidth = k % 4 === 0 ? 2 : 1;
+        g.beginPath(); g.ellipse(CX, CY + 6 * fs, R, R * 0.72, -0.18, a0, a0 + ln); g.stroke();
       }
+      g.lineCap = 'butt';
+      // 낮게 깔리는 남빛 안개(화면 폭 전체로 겹겹이 흘러간다)
+      var nFog = Math.round(8 * Math.max(1, W / 360));
+      for (k = 0; k < nFog; k++) {
+        var fsp = 5 + k * 2.2, fxp = ((t * fsp + k * 97) % (W + 200)) - 100, fyp = H * 0.73 + (k % 4) * 42 * fs + Math.sin(t * 0.3 + k) * 8, rw = 150 + (k % 3) * 40;
+        var fogG = g.createRadialGradient && g.createRadialGradient(fxp, fyp, 4, fxp, fyp, rw);
+        if (fogG && fogG.addColorStop) { fogG.addColorStop(0, 'rgba(70, 96, 140, ' + (0.10 + 0.03 * (k % 2)).toFixed(3) + ')'); fogG.addColorStop(1, 'rgba(70, 96, 140, 0)'); g.fillStyle = fogG; g.save(); g.translate(fxp, fyp); g.scale(1, 0.3); g.translate(-fxp, -fyp); g.fillRect(fxp - rw, fyp - rw, rw * 2, rw * 2); g.restore(); }
+      }
+      // 떠오르는 영혼 입자(청록)와 은빛 재 — 바람에 비스듬히 휩쓸리며 화면 전체로
+      var nMote = Math.round(110 * Math.max(1, area * 0.9));
+      for (i = 0; i < nMote; i++) {
+        var life = 6 + (i % 7), ph = ((t + i * 1.37) % life) / life, drift = ph * 120 * (0.5 + (i % 3) * 0.25);
+        var ax = ((i * 59) % W + drift + Math.cos(ph * 3 + i) * 10) % (W + 20) - 10, ay = H + 20 - ph * (H + 80) + ((i * 31) % 60);
+        g.globalAlpha = Math.max(0, Math.sin(ph * Math.PI)) * (0.45 + 0.45 * Math.abs(Math.sin(t * 3 + i)));
+        g.fillStyle = i % 3 === 0 ? '#eef6ff' : (i % 5 === 0 ? '#8aa4c8' : '#4deeea'); g.fillRect(Math.round(ax), Math.round(ay), i % 9 === 0 ? 2 : 1, i % 9 === 0 ? 2 : 1);
+      }
+      var nEmber = Math.round(10 * Math.max(1, W / 360));
+      for (i = 0; i < nEmber; i++) {   // 큰 영혼 불씨(푸른 불씨, 번진 빛)
+        var ph3 = ((t * 0.07 + i * 0.1) % 1), wx = (CX + Math.sin(t * 0.5 + i * 2) * (40 + i * 11) + ph3 * 160 * ((i % 2) ? 1 : -1) + W) % W, wy = H * 0.66 - ph3 * H * 0.6;
+        g.globalAlpha = 0.55 * Math.sin(ph3 * Math.PI);
+        var wg = g.createRadialGradient && g.createRadialGradient(wx, wy, 0, wx, wy, 6);
+        if (wg && wg.addColorStop) { wg.addColorStop(0, 'rgba(184, 255, 251, 0.95)'); wg.addColorStop(1, 'rgba(44, 198, 204, 0)'); g.fillStyle = wg; g.fillRect(wx - 6, wy - 6, 12, 12); }
+      }
+      g.globalAlpha = 1;
+      // 가장자리 비네트(화면 크기에 맞춰)
+      var vr = Math.max(W, H) * 0.7, vg = g.createRadialGradient && g.createRadialGradient(CX, H * 0.47, Math.min(W, H) * 0.25, CX, H * 0.5, vr);
+      if (vg && vg.addColorStop) { vg.addColorStop(0, 'rgba(0, 0, 0, 0)'); vg.addColorStop(1, 'rgba(2, 3, 8, 0.75)'); g.fillStyle = vg; g.fillRect(0, 0, W, H); }
     },
 
-    /* 화면 가장자리 비네트 — 배경/플레이어 위에 항상 마지막으로 덮는다.
-       PHASE 8.1-C: 정화 전에는 더 좁고 짙게(압박감), 정화 후에는 더 넓고
-       옅게(트인 느낌) 바뀐다. atmosphere 가 0→1 로 서서히 움직이므로
-       전환도 뚝 끊기지 않고 자연스럽게 이어진다. */
-    drawVignette: function (ctx) {
-      var W = INTERNAL_W, H = INTERNAL_H;
-      var a = this.atmosphere;
-      var inner = H * (0.30 + 0.14 * a);   // 0.30 → 0.44 (밝아질수록 가장자리만 남는다)
-      var edge = 0.68 - 0.34 * a;          // 0.68 → 0.34
-
-      var vig = ctx.createRadialGradient(W / 2, H / 2, inner, W / 2, H / 2, H * 0.95);
-      vig.addColorStop(0, 'rgba(0,0,0,0)');
-      vig.addColorStop(1, 'rgba(0,0,0,' + edge.toFixed(3) + ')');
-      ctx.fillStyle = vig;
-      ctx.fillRect(0, 0, W, H);
+    /* ---------------------------------------------------------------- 실제 루프 */
+    loop: function () {
+      var self = this, last = U.now();
+      var frame = function () {
+        var now = U.now(), dt = (now - last) / 1000; last = now;
+        try { self.step(dt); self.render(); } catch (e) { if (global.console) console.error(e); }
+        global.requestAnimationFrame(frame);
+      };
+      global.requestAnimationFrame(frame);
     }
   };
-
-  MG.Game = Game;
 })(window);

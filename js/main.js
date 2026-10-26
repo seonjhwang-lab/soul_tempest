@@ -1,36 +1,33 @@
 /* ==========================================================================
-   main.js — 애플리케이션 진입점
-   각 시스템을 정해진 순서로 초기화한다.
+   main.js — 부팅: 입력 · UI · 게임 초기화, 풀스크린 무대(v81: 레터박스 없음 — 뷰포트 전체)에 논리 해상도 맞추기, 루프 시작
    ========================================================================== */
 (function (global) {
   'use strict';
-
-  var MG = global.MG = global.MG || {};
-
+  var MG = global.MG;
+  function viewport() {
+    var w = global.innerWidth || 360, h = global.innerHeight || 640, v = global.visualViewport;
+    if (v && v.width > 0 && v.height > 0) { w = Math.min(w, v.width); h = Math.min(h, v.height); }
+    return { w: w, h: h };
+  }
+  function resize() {
+    var st = document.getElementById('stage'); if (!st) return;
+    // 무대는 CSS 로 언제나 뷰포트 전체(position: fixed; inset: 0). 그 실제 크기에 논리 해상도를 맞춘다.
+    var r = st.getBoundingClientRect(), v = viewport(), w = r.width || v.w, h = r.height || v.h;
+    if (w === resize.w && h === resize.h) return;
+    resize.w = w; resize.h = h;
+    MG.UI.onResize(w, h);
+  }
   function boot() {
-    try {
-      if (MG.Audio && MG.Audio.init) MG.Audio.init();
-      if (MG.Input && MG.Input.init) MG.Input.init();
-
-      if (!MG.Game.init()) return;      // 캔버스 / 루프 / 스케일
-      if (MG.Map && MG.Map.init) MG.Map.init();       // 지형 / 충돌 (Player 보다 먼저)
-      if (MG.Player && MG.Player.init) MG.Player.init();
-      if (MG.Enemy && MG.Enemy.init) MG.Enemy.init();  // 모슬링 배치 (맵 충돌 데이터 필요 — Map 이후)
-      if (MG.Companion && MG.Companion.init) MG.Companion.init();  // PHASE 9 STEP 2: 모스키(갇힌 상태)
-      if (MG.Customer && MG.Customer.init) MG.Customer.init();     // LAZY DINER STEP 4-1: 첫 손님
-      MG.UI.init();                     // 오버레이 / 방향 경고 (Game 이후에 초기화)
-      // PHASE 12 STEP 1: 완료 화면의 피드백 폼 배선 (DOM 이 필요하므로 UI 다음)
-      if (MG.Feedback && MG.Feedback.init) MG.Feedback.init();
-
-      console.log('[달빛 숲의 수호자] Prototype v' + MG.Game.VERSION + ' — PHASE 9 STEP 4');
-    } catch (err) {
-      console.error('[MG] 초기화 실패:', err);
-    }
+    MG.Input.init();
+    MG.UI.init();
+    MG.Game.init(document.getElementById('game'));
+    if (MG.Audio && MG.Audio.init) try { MG.Audio.init(); } catch (e) { /* 소리 없이 */ }
+    resize();
+    global.addEventListener('resize', resize);
+    if (global.visualViewport) global.visualViewport.addEventListener('resize', resize);
+    global.setInterval(resize, 800);
+    if (('ontouchstart' in global) || (global.navigator && global.navigator.maxTouchPoints > 0)) document.body.classList.add('mg-touch');
+    MG.Game.loop();
   }
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', boot);
-  } else {
-    boot();
-  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();
 })(window);
